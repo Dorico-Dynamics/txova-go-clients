@@ -261,7 +261,7 @@ func (c *Client) VerifyID(ctx context.Context, idNumber string, idType IDType, c
 		IDType:    string(idType),
 		IDNumber:  idNumber,
 		PartnerParams: map[string]string{
-			"job_type": "5", // Basic KYC
+			"job_type": "5", // Enhanced KYC (JobTypeEnhancedKYC)
 		},
 	}
 
@@ -352,31 +352,33 @@ type faceCompareRequest struct {
 	PartnerParams map[string]string `json:"partner_params"`
 }
 
-// VerifyFace compares a new selfie against a previously enrolled selfie.
+// VerifyFace compares a new selfie against a previously enrolled selfie for a user.
 // This is a SmartSelfie Authentication operation (job_type=2).
-// The enrolledSelfie should be the selfie captured during SmartSelfie Registration.
-func (c *Client) VerifyFace(ctx context.Context, selfie, enrolledSelfie []byte) (*FaceMatchResult, error) {
+// The userID must be the same user_id used during SmartSelfie Registration (job_type=4)
+// so the server can look up the enrolled reference selfie.
+func (c *Client) VerifyFace(ctx context.Context, selfie []byte, userID string) (*FaceMatchResult, error) {
 	if len(selfie) == 0 {
 		return nil, fmt.Errorf("selfie is required")
 	}
-	if len(enrolledSelfie) == 0 {
-		return nil, fmt.Errorf("enrolled selfie is required")
+	if userID == "" {
+		return nil, fmt.Errorf("user ID is required")
 	}
 
 	timestamp := time.Now().UTC().Format(time.RFC3339)
 	signature := c.generateSignature(timestamp)
 
-	// SmartSelfie Authentication compares two selfies - no ID card images.
+	// SmartSelfie Authentication sends only the new selfie; the server looks up
+	// the enrolled reference selfie using the user_id from PartnerParams.
 	req := faceCompareRequest{
 		PartnerID: c.partnerID,
 		Timestamp: timestamp,
 		Signature: signature,
 		Images: []imageEntry{
 			{ImageTypeID: ImageTypeSelfie, Image: base64.StdEncoding.EncodeToString(selfie)},
-			{ImageTypeID: ImageTypeSelfie, Image: base64.StdEncoding.EncodeToString(enrolledSelfie)},
 		},
 		PartnerParams: map[string]string{
-			"job_type": "2", // SmartSelfie Authentication
+			"job_type": "2", // SmartSelfie Authentication (JobTypeSmartSelfieAuthentication)
+			"user_id":  userID,
 		},
 	}
 

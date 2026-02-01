@@ -250,17 +250,17 @@ func TestVerifyIDWithPhoto(t *testing.T) {
 
 func TestVerifyFace(t *testing.T) {
 	tests := []struct {
-		name           string
-		selfie         []byte
-		enrolledSelfie []byte
-		response       FaceMatchResult
-		statusCode     int
-		wantErr        string
+		name       string
+		selfie     []byte
+		userID     string
+		response   FaceMatchResult
+		statusCode int
+		wantErr    string
 	}{
 		{
-			name:           "successful face match",
-			selfie:         []byte("selfie-data"),
-			enrolledSelfie: []byte("enrolled-selfie-data"),
+			name:   "successful face match",
+			selfie: []byte("selfie-data"),
+			userID: "user-123",
 			response: FaceMatchResult{
 				JobID:           "job123",
 				ResultCode:      ResultCodeApproved,
@@ -270,14 +270,14 @@ func TestVerifyFace(t *testing.T) {
 			statusCode: http.StatusOK,
 		},
 		{
-			name:           "returns error for empty selfie",
-			enrolledSelfie: []byte("data"),
-			wantErr:        "selfie is required",
+			name:    "returns error for empty selfie",
+			userID:  "user-123",
+			wantErr: "selfie is required",
 		},
 		{
-			name:    "returns error for empty enrolled selfie",
+			name:    "returns error for empty user ID",
 			selfie:  []byte("data"),
-			wantErr: "enrolled selfie is required",
+			wantErr: "user ID is required",
 		},
 	}
 
@@ -295,7 +295,7 @@ func TestVerifyFace(t *testing.T) {
 				client.SetBaseURL(server.URL)
 			}
 
-			result, err := client.VerifyFace(context.Background(), tt.selfie, tt.enrolledSelfie)
+			result, err := client.VerifyFace(context.Background(), tt.selfie, tt.userID)
 
 			if tt.wantErr != "" {
 				require.Error(t, err)

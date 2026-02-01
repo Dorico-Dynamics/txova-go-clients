@@ -355,6 +355,7 @@ func (c *Client) Refund(ctx context.Context, transactionID string, amount money.
 // If the path starts with a port (e.g., ":18352/ipg/..."), the port is inserted
 // into the base URL only if the base URL doesn't already have a port.
 // This allows test servers (which have random ports) to work correctly.
+// Any base path (e.g., "/api" prefix) in the base URL is preserved.
 func (c *Client) buildURL(path string) string {
 	// Check if path starts with a port specification.
 	if path != "" && path[0] == ':' {
@@ -380,8 +381,8 @@ func (c *Client) buildURL(path string) string {
 			return c.baseURL + pathPart
 		}
 
-		// Insert port into the URL.
-		return parsed.Scheme + "://" + parsed.Host + portPart + pathPart
+		// Insert port into the URL, preserving any base path (e.g., "/api" prefix).
+		return parsed.Scheme + "://" + parsed.Host + portPart + parsed.Path + pathPart
 	}
 
 	// No port prefix, simple concatenation.
@@ -669,11 +670,17 @@ func ResponseCodeDescription(code string) string {
 }
 
 // SetHTTPClient sets a custom HTTP client (useful for testing).
+// If client is nil, the existing HTTP client is preserved.
 func (c *Client) SetHTTPClient(client *http.Client) {
-	c.httpClient = client
+	if client != nil {
+		c.httpClient = client
+	}
 }
 
 // SetBaseURL sets a custom base URL (useful for testing).
+// If baseURL is empty, the existing base URL is preserved.
 func (c *Client) SetBaseURL(baseURL string) {
-	c.baseURL = baseURL
+	if baseURL != "" {
+		c.baseURL = baseURL
+	}
 }

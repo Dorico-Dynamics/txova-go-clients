@@ -153,7 +153,7 @@ Default configuration: 5 failures to open, 30 second timeout.
 
 ### Requirements
 
-- Go 1.23+
+- Go 1.25+
 
 ### Testing
 

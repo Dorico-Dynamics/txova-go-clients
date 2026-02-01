@@ -77,14 +77,28 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: v2.1
-          args: --timeout=5m
-
       - name: Run go vet
         run: go vet ./...
+
+      - name: Run go fmt check
+        run: |
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "Code is not formatted properly:"
+            gofmt -l .
+            exit 1
+          fi
+
+      # golangci-lint v2 is required for the .golangci.yml config
+      # https://golangci-lint.run/docs/welcome/install/
+      - name: Install and run golangci-lint
+        run: |
+          curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.8.0
+          golangci-lint run ./...
+
+      - name: Install and run staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
 
       - name: Check go mod tidy
         run: |
@@ -107,10 +121,12 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Run gosec
-        uses: securego/gosec@master
-        with:
-          args: -exclude-generated ./...
+      # gosec version: https://github.com/securego/gosec/releases
+      # To bump: update the version tag below (e.g., v2.22.11 -> v2.23.0)
+      - name: Install and run gosec
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.22.11
+          gosec ./...
 
   sonarqube:
     name: SonarQube Analysis
@@ -134,13 +150,13 @@ jobs:
           name: coverage
 
       - name: SonarQube Scan
-        uses: SonarSource/sonarqube-scan-action@v5
+        uses: SonarSource/sonarqube-scan-action@v6
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
       - name: SonarQube Quality Gate Check
-        uses: sonarsource/sonarqube-quality-gate-action@v1.1.0
+        uses: sonarsource/sonarqube-quality-gate-action@v1.2.0
         timeout-minutes: 5
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -149,7 +165,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [test, lint]
+    needs: [test, lint, security]
     strategy:
       matrix:
         os: [linux, darwin, windows]

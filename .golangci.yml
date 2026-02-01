@@ -135,6 +135,11 @@ linters:
           - intrange
           - nestif
 
+      # Factory pattern intentionally repeats similar logic per client type
+      - path: factory/factory\.go
+        linters:
+          - dupl
+
       - path: _test\.go
         text: "fieldalignment"
 

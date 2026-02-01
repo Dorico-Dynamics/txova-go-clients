@@ -44,16 +44,25 @@ func DefaultConfig(baseURL string) *Config {
 	}
 }
 
+// defaultTimeout is the default timeout for User Service requests.
+const defaultTimeout = 10 * time.Second
+
 // NewClient creates a new User Service client.
 func NewClient(cfg *Config, logger *logging.Logger) (*Client, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config is required")
 	}
 
+	// Apply default timeout when not specified.
+	timeout := cfg.Timeout
+	if timeout == 0 {
+		timeout = defaultTimeout
+	}
+
 	baseCfg := &base.Config{
 		BaseURL:        cfg.BaseURL,
-		Timeout:        cfg.Timeout,
-		RequestTimeout: cfg.Timeout,
+		Timeout:        timeout,
+		RequestTimeout: timeout,
 		Retry:          cfg.Retry,
 		CircuitBreaker: cfg.CircuitBreaker,
 	}

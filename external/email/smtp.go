@@ -217,8 +217,7 @@ func (c *SMTPClient) sendEmail(ctx context.Context, to []string, subject, body s
 
 	if c.logger != nil {
 		c.logger.DebugContext(ctx, "email sent via SMTP",
-			"to", strings.Join(to, ","),
-			"subject", subject,
+			"recipient_count", len(to),
 		)
 	}
 
@@ -252,6 +251,29 @@ func (c *SMTPClient) validateEmailParams(to []string, subject, body string) erro
 	return nil
 }
 
+// deadlineConn wraps a net.Conn and sets read/write deadlines before each operation.
+// This ensures all SMTP operations (StartTLS, Auth, Mail, Rcpt, Data, Quit) are bounded.
+type deadlineConn struct {
+	net.Conn
+	timeout time.Duration
+}
+
+// Read sets a read deadline before reading.
+func (c *deadlineConn) Read(b []byte) (int, error) {
+	if err := c.SetReadDeadline(time.Now().Add(c.timeout)); err != nil {
+		return 0, err
+	}
+	return c.Conn.Read(b)
+}
+
+// Write sets a write deadline before writing.
+func (c *deadlineConn) Write(b []byte) (int, error) {
+	if err := c.SetWriteDeadline(time.Now().Add(c.timeout)); err != nil {
+		return 0, err
+	}
+	return c.Conn.Write(b)
+}
+
 // connect establishes a connection to the SMTP server.
 func (c *SMTPClient) connect(ctx context.Context) (*smtp.Client, error) {
 	addr := fmt.Sprintf("%s:%d", c.host, c.port)
@@ -262,7 +284,10 @@ func (c *SMTPClient) connect(ctx context.Context) (*smtp.Client, error) {
 		return nil, fmt.Errorf("failed to connect to SMTP server: %w", err)
 	}
 
-	client, err := smtp.NewClient(conn, c.host)
+	// Wrap connection with deadline enforcement for all SMTP operations.
+	wrappedConn := &deadlineConn{Conn: conn, timeout: c.timeout}
+
+	client, err := smtp.NewClient(wrappedConn, c.host)
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("failed to create SMTP client: %w", err)

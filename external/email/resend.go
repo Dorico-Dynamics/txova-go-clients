@@ -94,8 +94,29 @@ type ResendSendResult struct {
 	ID string `json:"id"`
 }
 
+// validateEmailInput validates common email input parameters.
+func validateEmailInput(recipientCount int, subject, textBody, htmlBody string) error {
+	if recipientCount == 0 {
+		return fmt.Errorf("at least one recipient is required")
+	}
+	if subject == "" {
+		return fmt.Errorf("subject is required")
+	}
+	if textBody == "" && htmlBody == "" {
+		return fmt.Errorf("text or HTML body is required")
+	}
+	return nil
+}
+
 // Send sends a plain text email via Resend.
 func (c *ResendClient) Send(ctx context.Context, to contact.Email, subject, body string) error {
+	if to.IsZero() {
+		return fmt.Errorf("at least one recipient is required")
+	}
+	if err := validateEmailInput(1, subject, body, ""); err != nil {
+		return err
+	}
+
 	req := resendEmailRequest{
 		From:    c.formatFrom(),
 		To:      []string{to.String()},
@@ -108,6 +129,13 @@ func (c *ResendClient) Send(ctx context.Context, to contact.Email, subject, body
 
 // SendHTML sends an HTML email via Resend.
 func (c *ResendClient) SendHTML(ctx context.Context, to contact.Email, subject, htmlBody string) error {
+	if to.IsZero() {
+		return fmt.Errorf("at least one recipient is required")
+	}
+	if err := validateEmailInput(1, subject, "", htmlBody); err != nil {
+		return err
+	}
+
 	req := resendEmailRequest{
 		From:    c.formatFrom(),
 		To:      []string{to.String()},
@@ -120,6 +148,10 @@ func (c *ResendClient) SendHTML(ctx context.Context, to contact.Email, subject, 
 
 // SendToMultiple sends an email to multiple recipients via Resend.
 func (c *ResendClient) SendToMultiple(ctx context.Context, to []contact.Email, subject, body string) error {
+	if err := validateEmailInput(len(to), subject, body, ""); err != nil {
+		return err
+	}
+
 	recipients := make([]string, len(to))
 	for i, email := range to {
 		recipients[i] = email.String()
@@ -148,14 +180,8 @@ type SendOptions struct {
 
 // SendWithOptions sends an email with advanced options via Resend.
 func (c *ResendClient) SendWithOptions(ctx context.Context, opts SendOptions) (*ResendSendResult, error) {
-	if len(opts.To) == 0 {
-		return nil, fmt.Errorf("at least one recipient is required")
-	}
-	if opts.Subject == "" {
-		return nil, fmt.Errorf("subject is required")
-	}
-	if opts.Text == "" && opts.HTML == "" {
-		return nil, fmt.Errorf("text or HTML body is required")
+	if err := validateEmailInput(len(opts.To), opts.Subject, opts.Text, opts.HTML); err != nil {
+		return nil, err
 	}
 
 	recipients := make([]string, len(opts.To))
@@ -240,8 +266,7 @@ func (c *ResendClient) sendEmail(ctx context.Context, req resendEmailRequest) (*
 	if c.logger != nil {
 		c.logger.DebugContext(ctx, "email sent via Resend",
 			"email_id", result.ID,
-			"to", req.To,
-			"subject", req.Subject,
+			"recipient_count", len(req.To),
 		)
 	}
 
@@ -262,6 +287,10 @@ func (c *ResendClient) SetBaseURL(url string) {
 }
 
 // SetHTTPClient sets a custom HTTP client (useful for testing).
+// If client is nil, http.DefaultClient is used to prevent nil dereference.
 func (c *ResendClient) SetHTTPClient(client *http.Client) {
+	if client == nil {
+		client = http.DefaultClient
+	}
 	c.httpClient = client
 }

@@ -16,7 +16,12 @@ import (
 	"time"
 
 	"github.com/Dorico-Dynamics/txova-go-core/logging"
+	"github.com/Dorico-Dynamics/txova-go-kafka/envelope"
+	"github.com/Dorico-Dynamics/txova-go-kafka/events"
+	"github.com/Dorico-Dynamics/txova-go-kafka/producer"
 	"github.com/Dorico-Dynamics/txova-go-types/contact"
+	"github.com/Dorico-Dynamics/txova-go-types/enums"
+	"github.com/Dorico-Dynamics/txova-go-types/ids"
 	"github.com/Dorico-Dynamics/txova-go-types/money"
 )
 
@@ -34,6 +39,7 @@ type Client struct {
 	publicKey           string
 	serviceProviderCode string
 	logger              *logging.Logger
+	producer            *producer.Producer
 }
 
 // Config holds the configuration for the M-Pesa client.
@@ -52,6 +58,10 @@ type Config struct {
 
 	// Timeout is the request timeout (default: 60s for payment operations).
 	Timeout time.Duration
+
+	// Producer is the Kafka producer for event publishing (optional).
+	// If nil, events will not be published.
+	Producer *producer.Producer
 }
 
 // NewClient creates a new M-Pesa client.
@@ -86,8 +96,12 @@ func NewClient(cfg *Config, logger *logging.Logger) (*Client, error) {
 		publicKey:           cfg.PublicKey,
 		serviceProviderCode: cfg.ServiceProviderCode,
 		logger:              logger,
+		producer:            cfg.Producer,
 	}, nil
 }
+
+// serviceName is used as the source in Kafka envelopes.
+const serviceName = "mpesa-client"
 
 // InitiateResult represents the result of a payment initiation.
 type InitiateResult struct {
@@ -180,6 +194,55 @@ func (c *Client) Initiate(ctx context.Context, phone contact.PhoneNumber, amount
 	}
 
 	return &result, nil
+}
+
+// InitiateWithEvent initiates a payment and publishes a PaymentInitiated event to Kafka.
+// This is the preferred method when event publishing is required.
+func (c *Client) InitiateWithEvent(ctx context.Context, paymentID ids.PaymentID, rideID ids.RideID, phone contact.PhoneNumber, amount money.Money, reference string) (*InitiateResult, error) {
+	result, err := c.Initiate(ctx, phone, amount, reference)
+	if err != nil {
+		return nil, err
+	}
+
+	// Publish PaymentInitiated event if producer is configured
+	c.publishPaymentInitiated(ctx, paymentID, rideID, amount)
+
+	return result, nil
+}
+
+// publishPaymentInitiated publishes a PaymentInitiated event to Kafka.
+func (c *Client) publishPaymentInitiated(ctx context.Context, paymentID ids.PaymentID, rideID ids.RideID, amount money.Money) {
+	if c.producer == nil {
+		return
+	}
+
+	payload := events.PaymentInitiated{
+		PaymentID: paymentID,
+		RideID:    rideID,
+		Amount:    amount.Centavos(),
+		Method:    enums.PaymentMethodMPesa,
+	}
+
+	env, err := envelope.NewWithContext(ctx, &envelope.Config{
+		Type:    string(events.EventTypePaymentInitiated),
+		Version: events.VersionLatest,
+		Source:  serviceName,
+		Payload: payload,
+	})
+	if err != nil {
+		c.logger.WarnContext(ctx, "failed to create payment initiated envelope",
+			"error", err.Error(),
+			"payment_id", paymentID.String(),
+		)
+		return
+	}
+
+	if err := c.producer.Publish(ctx, env, paymentID.String()); err != nil {
+		c.logger.WarnContext(ctx, "failed to publish payment initiated event",
+			"error", err.Error(),
+			"payment_id", paymentID.String(),
+		)
+	}
 }
 
 // queryRequest is the request body for transaction queries.
@@ -398,6 +461,73 @@ func ParseCallback(body []byte) (*Callback, error) {
 		return nil, fmt.Errorf("failed to parse callback: %w", err)
 	}
 	return &callback, nil
+}
+
+// HandleCallback processes an M-Pesa callback and publishes the appropriate event.
+// It publishes PaymentCompleted on success or PaymentFailed on failure.
+func (c *Client) HandleCallback(ctx context.Context, paymentID ids.PaymentID, callback *Callback) error {
+	if callback == nil {
+		return fmt.Errorf("callback is required")
+	}
+
+	if c.producer == nil {
+		// No producer configured, nothing to publish
+		return nil
+	}
+
+	if callback.ResponseCode == ResponseCodeSuccess {
+		return c.publishPaymentCompleted(ctx, paymentID, callback.TransactionID)
+	}
+	return c.publishPaymentFailed(ctx, paymentID, callback.ResponseCode, callback.ResponseDesc)
+}
+
+// publishPaymentCompleted publishes a PaymentCompleted event to Kafka.
+func (c *Client) publishPaymentCompleted(ctx context.Context, paymentID ids.PaymentID, transactionRef string) error {
+	payload := events.PaymentCompleted{
+		PaymentID:      paymentID,
+		TransactionRef: transactionRef,
+	}
+
+	env, err := envelope.NewWithContext(ctx, &envelope.Config{
+		Type:    string(events.EventTypePaymentCompleted),
+		Version: events.VersionLatest,
+		Source:  serviceName,
+		Payload: payload,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create payment completed envelope: %w", err)
+	}
+
+	if err := c.producer.Publish(ctx, env, paymentID.String()); err != nil {
+		return fmt.Errorf("failed to publish payment completed event: %w", err)
+	}
+
+	return nil
+}
+
+// publishPaymentFailed publishes a PaymentFailed event to Kafka.
+func (c *Client) publishPaymentFailed(ctx context.Context, paymentID ids.PaymentID, errorCode, errorMessage string) error {
+	payload := events.PaymentFailed{
+		PaymentID:    paymentID,
+		ErrorCode:    errorCode,
+		ErrorMessage: errorMessage,
+	}
+
+	env, err := envelope.NewWithContext(ctx, &envelope.Config{
+		Type:    string(events.EventTypePaymentFailed),
+		Version: events.VersionLatest,
+		Source:  serviceName,
+		Payload: payload,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create payment failed envelope: %w", err)
+	}
+
+	if err := c.producer.Publish(ctx, env, paymentID.String()); err != nil {
+		return fmt.Errorf("failed to publish payment failed event: %w", err)
+	}
+
+	return nil
 }
 
 // IsSuccess returns true if the response indicates success.

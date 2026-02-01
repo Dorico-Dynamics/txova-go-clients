@@ -18,7 +18,6 @@ import (
 	"github.com/Dorico-Dynamics/txova-go-core/logging"
 	"github.com/Dorico-Dynamics/txova-go-kafka/envelope"
 	"github.com/Dorico-Dynamics/txova-go-kafka/events"
-	"github.com/Dorico-Dynamics/txova-go-kafka/producer"
 	"github.com/Dorico-Dynamics/txova-go-types/contact"
 	"github.com/Dorico-Dynamics/txova-go-types/enums"
 	"github.com/Dorico-Dynamics/txova-go-types/ids"
@@ -31,6 +30,12 @@ const (
 	ProductionBaseURL = "https://api.vm.co.mz"
 )
 
+// EventPublisher defines the interface for publishing Kafka events.
+// This allows for mocking in tests.
+type EventPublisher interface {
+	Publish(ctx context.Context, env *envelope.Envelope, partitionKey string) error
+}
+
 // Client is the M-Pesa client.
 type Client struct {
 	httpClient          *http.Client
@@ -39,7 +44,7 @@ type Client struct {
 	publicKey           string
 	serviceProviderCode string
 	logger              *logging.Logger
-	producer            *producer.Producer
+	producer            EventPublisher
 }
 
 // Config holds the configuration for the M-Pesa client.
@@ -61,7 +66,7 @@ type Config struct {
 
 	// Producer is the Kafka producer for event publishing (optional).
 	// If nil, events will not be published.
-	Producer *producer.Producer
+	Producer EventPublisher
 }
 
 // NewClient creates a new M-Pesa client.

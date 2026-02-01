@@ -2,8 +2,10 @@ package sms
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -242,26 +244,92 @@ func TestGetBalance(t *testing.T) {
 		}))
 		defer server.Close()
 
-		// Note: GetBalance uses a hardcoded URL, so we need to test with the actual endpoint
-		// For unit testing, we'll skip the actual API call test
+		client := createTestClientWithBalanceURL(t, server.URL, server.URL)
+		balance, err := client.GetBalance(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if balance.Value != "MZN 150.00" {
+			t.Errorf("expected balance 'MZN 150.00', got %s", balance.Value)
+		}
+	})
+
+	t.Run("returns error on network failure", func(t *testing.T) {
 		cfg := &Config{
 			Username: "testuser",
 			APIKey:   "testapikey",
-			Timeout:  5 * time.Second,
+			Timeout:  100 * time.Millisecond,
 		}
 		client, err := NewClient(cfg, nil)
 		if err != nil {
 			t.Fatalf("failed to create client: %v", err)
 		}
 
-		// Replace HTTP client with test server client
-		client.httpClient = server.Client()
-		// This won't work directly since GetBalance uses a hardcoded URL
-		// We verify the client was created correctly instead
-		if client.username != "testuser" {
-			t.Errorf("expected username 'testuser', got %s", client.username)
+		// Use a transport that always fails
+		client.httpClient = &http.Client{
+			Timeout:   100 * time.Millisecond,
+			Transport: &failingTransport{},
+		}
+
+		_, err = client.GetBalance(context.Background())
+		if err == nil {
+			t.Fatal("expected error, got nil")
 		}
 	})
+
+	t.Run("returns error on API error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error": "Unauthorized"}`))
+		}))
+		defer server.Close()
+
+		client := createTestClientWithBalanceURL(t, server.URL, server.URL)
+		_, err := client.GetBalance(context.Background())
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("handles invalid JSON response", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`not valid json`))
+		}))
+		defer server.Close()
+
+		client := createTestClientWithBalanceURL(t, server.URL, server.URL)
+		_, err := client.GetBalance(context.Background())
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("handles context cancellation", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			// Block forever
+			select {}
+		}))
+		defer server.Close()
+
+		client := createTestClientWithBalanceURL(t, server.URL, server.URL)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+
+		_, err := client.GetBalance(ctx)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+}
+
+// failingTransport is an http.RoundTripper that always returns an error.
+type failingTransport struct{}
+
+func (t *failingTransport) RoundTrip(_ *http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("network error")
 }
 
 func TestParseDeliveryCallback(t *testing.T) {
@@ -326,6 +394,110 @@ func TestNewMockResponse(t *testing.T) {
 	}
 }
 
+func TestSetHTTPClient(t *testing.T) {
+	cfg := &Config{
+		Username: "testuser",
+		APIKey:   "testapikey",
+	}
+	client, err := NewClient(cfg, nil)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	customClient := &http.Client{Timeout: 5 * time.Second}
+	client.SetHTTPClient(customClient)
+
+	if client.httpClient != customClient {
+		t.Error("expected custom HTTP client to be set")
+	}
+}
+
+func TestSendSMSErrors(t *testing.T) {
+	phone := contact.MustParsePhoneNumber("841234567")
+
+	t.Run("handles network error", func(t *testing.T) {
+		cfg := &Config{
+			Username: "testuser",
+			APIKey:   "testapikey",
+			Timeout:  100 * time.Millisecond,
+		}
+		client, err := NewClient(cfg, nil)
+		if err != nil {
+			t.Fatalf("failed to create client: %v", err)
+		}
+		client.baseURL = "http://localhost:59999" // Invalid port
+
+		_, err = client.Send(context.Background(), phone, "Test message")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("handles invalid JSON response", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`not valid json`))
+		}))
+		defer server.Close()
+
+		client := createTestClient(t, server.URL)
+		_, err := client.Send(context.Background(), phone, "Test message")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("handles context cancellation", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			// Block forever
+			select {}
+		}))
+		defer server.Close()
+
+		client := createTestClient(t, server.URL)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+
+		_, err := client.Send(ctx, phone, "Test message")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("returns error when no recipients in response", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{
+				"SMSMessageData": {
+					"Message": "Sent to 0/1",
+					"Recipients": []
+				}
+			}`))
+		}))
+		defer server.Close()
+
+		client := createTestClient(t, server.URL)
+		_, err := client.Send(context.Background(), phone, "Test message")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+}
+
+func TestParseDeliveryCallbackFormError(t *testing.T) {
+	t.Run("handles form parse error", func(t *testing.T) {
+		// Create a request with an invalid body that will cause ParseForm to fail
+		req := httptest.NewRequest(http.MethodPost, "/callback", strings.NewReader("%invalid%"))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+		_, err := ParseDeliveryCallbackForm(req)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+}
+
 func createTestClient(t *testing.T, baseURL string) *Client {
 	t.Helper()
 	cfg := &Config{
@@ -339,5 +511,22 @@ func createTestClient(t *testing.T, baseURL string) *Client {
 		t.Fatalf("failed to create client: %v", err)
 	}
 	client.baseURL = baseURL
+	return client
+}
+
+func createTestClientWithBalanceURL(t *testing.T, baseURL, balanceURL string) *Client {
+	t.Helper()
+	cfg := &Config{
+		Username: "testuser",
+		APIKey:   "testapikey",
+		SenderID: "TXOVA",
+		Timeout:  10 * time.Second,
+	}
+	client, err := NewClient(cfg, nil)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	client.baseURL = baseURL
+	client.balanceURL = balanceURL
 	return client
 }

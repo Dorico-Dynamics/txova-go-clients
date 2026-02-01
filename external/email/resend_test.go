@@ -321,6 +321,61 @@ func TestResendFormatFrom(t *testing.T) {
 	})
 }
 
+func TestResendSetHTTPClient(t *testing.T) {
+	client, _ := newTestResendClient(t)
+
+	customClient := &http.Client{}
+	client.SetHTTPClient(customClient)
+
+	assert.Equal(t, customClient, client.httpClient)
+}
+
+func TestResendSendErrors(t *testing.T) {
+	t.Run("handles invalid JSON response", func(t *testing.T) {
+		client, _ := newTestResendClient(t)
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`not valid json`))
+		}))
+		defer server.Close()
+		client.SetBaseURL(server.URL)
+
+		to := mustParseEmail("user@example.com")
+		err := client.Send(context.Background(), to, "Test", "Body")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to decode response")
+	})
+
+	t.Run("handles network error", func(t *testing.T) {
+		client, _ := newTestResendClient(t)
+		client.SetBaseURL("http://localhost:59999") // Invalid port
+
+		to := mustParseEmail("user@example.com")
+		err := client.Send(context.Background(), to, "Test", "Body")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to send request")
+	})
+
+	t.Run("handles context cancellation", func(t *testing.T) {
+		client, _ := newTestResendClient(t)
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			// Slow response
+			select {}
+		}))
+		defer server.Close()
+		client.SetBaseURL(server.URL)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+
+		to := mustParseEmail("user@example.com")
+		err := client.Send(ctx, to, "Test", "Body")
+		require.Error(t, err)
+	})
+}
+
 func mustParseEmail(s string) contact.Email {
 	e, err := contact.ParseEmail(s)
 	if err != nil {

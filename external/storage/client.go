@@ -15,9 +15,22 @@ import (
 	"github.com/Dorico-Dynamics/txova-go-types/ids"
 )
 
+// minioClient defines the interface for MinIO operations used by Client.
+// This allows for mocking in tests.
+//
+//nolint:dupl // interface definition intentionally matches test mock
+type minioClient interface {
+	PutObject(ctx context.Context, bucketName, objectName string, reader io.Reader, objectSize int64, opts minio.PutObjectOptions) (minio.UploadInfo, error)
+	GetObject(ctx context.Context, bucketName, objectName string, opts minio.GetObjectOptions) (*minio.Object, error)
+	PresignedGetObject(ctx context.Context, bucketName, objectName string, expiry time.Duration, reqParams url.Values) (*url.URL, error)
+	RemoveObject(ctx context.Context, bucketName, objectName string, opts minio.RemoveObjectOptions) error
+	StatObject(ctx context.Context, bucketName, objectName string, opts minio.StatObjectOptions) (minio.ObjectInfo, error)
+	ListObjects(ctx context.Context, bucketName string, opts minio.ListObjectsOptions) <-chan minio.ObjectInfo
+}
+
 // Client is the storage client for MinIO/S3.
 type Client struct {
-	client *minio.Client
+	client minioClient
 	bucket string
 	logger *logging.Logger
 }
@@ -108,6 +121,8 @@ func (c *Client) Upload(ctx context.Context, key string, reader io.Reader, size 
 }
 
 // Download downloads an object from storage.
+//
+//nolint:unparam // io.ReadCloser is the API contract for callers
 func (c *Client) Download(ctx context.Context, key string) (io.ReadCloser, error) {
 	if key == "" {
 		return nil, fmt.Errorf("key is required")
@@ -217,7 +232,10 @@ func RideReceiptKey(rideID ids.RideID) string {
 
 // GetClient returns the underlying MinIO client for advanced operations.
 func (c *Client) GetClient() *minio.Client {
-	return c.client
+	if mc, ok := c.client.(*minio.Client); ok {
+		return mc
+	}
+	return nil
 }
 
 // GetBucket returns the configured bucket name.

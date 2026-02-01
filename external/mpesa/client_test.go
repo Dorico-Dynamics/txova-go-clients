@@ -3,15 +3,33 @@ package mpesa
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/Dorico-Dynamics/txova-go-core/logging"
+	"github.com/Dorico-Dynamics/txova-go-kafka/envelope"
 	"github.com/Dorico-Dynamics/txova-go-types/contact"
 	"github.com/Dorico-Dynamics/txova-go-types/ids"
 	"github.com/Dorico-Dynamics/txova-go-types/money"
 )
+
+// mockPublisher is a mock implementation of EventPublisher for testing.
+type mockPublisher struct {
+	publishFunc     func(ctx context.Context, env *envelope.Envelope, partitionKey string) error
+	publishedEvents []*envelope.Envelope
+}
+
+func (m *mockPublisher) Publish(ctx context.Context, env *envelope.Envelope, partitionKey string) error {
+	m.publishedEvents = append(m.publishedEvents, env)
+	if m.publishFunc != nil {
+		return m.publishFunc(ctx, env, partitionKey)
+	}
+	return nil
+}
 
 func TestNewClient(t *testing.T) {
 	t.Run("creates client with valid config", func(t *testing.T) {
@@ -525,6 +543,314 @@ func TestSetBaseURL(t *testing.T) {
 	}
 }
 
+func TestEncryptAPIKey(t *testing.T) {
+	// Test with valid PEM-encoded RSA public key
+	t.Run("encrypts with valid PEM key", func(t *testing.T) {
+		cfg := &Config{
+			APIKey:              "test-api-key",
+			PublicKey:           testRSAPublicKeyPEM,
+			ServiceProviderCode: "171717",
+		}
+		client, err := NewClient(cfg, nil)
+		if err != nil {
+			t.Fatalf("failed to create client: %v", err)
+		}
+
+		encrypted, err := client.encryptAPIKey()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Encrypted result should be base64 encoded and different from original
+		if encrypted == "test-api-key" {
+			t.Error("expected encrypted key to be different from original")
+		}
+		if encrypted == "" {
+			t.Error("expected non-empty encrypted key")
+		}
+	})
+
+	t.Run("falls back gracefully with invalid key", func(t *testing.T) {
+		cfg := &Config{
+			APIKey:              "test-api-key",
+			PublicKey:           "not-a-valid-key",
+			ServiceProviderCode: "171717",
+		}
+		client, err := NewClient(cfg, nil)
+		if err != nil {
+			t.Fatalf("failed to create client: %v", err)
+		}
+
+		// Should fall back to returning API key as-is
+		encrypted, err := client.encryptAPIKey()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if encrypted != "test-api-key" {
+			t.Errorf("expected fallback to API key, got %s", encrypted)
+		}
+	})
+
+	t.Run("encrypts with base64-encoded DER key", func(t *testing.T) {
+		cfg := &Config{
+			APIKey:              "test-api-key",
+			PublicKey:           testRSAPublicKeyBase64,
+			ServiceProviderCode: "171717",
+		}
+		client, err := NewClient(cfg, nil)
+		if err != nil {
+			t.Fatalf("failed to create client: %v", err)
+		}
+
+		encrypted, err := client.encryptAPIKey()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if encrypted == "test-api-key" {
+			t.Error("expected encrypted key to be different from original")
+		}
+	})
+}
+
+func TestDoRequestErrors(t *testing.T) {
+	t.Run("handles connection error", func(t *testing.T) {
+		client := createTestClient(t, "http://localhost:59999") // port that doesn't exist
+		phone := contact.MustParsePhoneNumber("841234567")
+		amount := money.FromMZN(100)
+
+		_, err := client.Initiate(context.Background(), phone, amount, "REF123")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("handles context cancellation", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			time.Sleep(100 * time.Millisecond)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		client := createTestClient(t, server.URL)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+
+		phone := contact.MustParsePhoneNumber("841234567")
+		amount := money.FromMZN(100)
+
+		_, err := client.Initiate(ctx, phone, amount, "REF123")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("handles invalid JSON response", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`not valid json`))
+		}))
+		defer server.Close()
+
+		client := createTestClient(t, server.URL)
+		phone := contact.MustParsePhoneNumber("841234567")
+		amount := money.FromMZN(100)
+
+		_, err := client.Initiate(context.Background(), phone, amount, "REF123")
+		if err == nil {
+			t.Fatal("expected error for invalid JSON response")
+		}
+	})
+}
+
+func TestPublishPaymentInitiated(t *testing.T) {
+	phone := contact.MustParsePhoneNumber("841234567")
+	amount := money.FromMZN(100)
+	logger := logging.New(logging.Config{Level: slog.LevelDebug})
+
+	t.Run("publishes event with producer configured", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"output_TransactionID": "TXN123456",
+				"output_ConversationID": "CONV123456",
+				"output_ResponseCode": "INS-0",
+				"output_ResponseDesc": "Request processed successfully",
+				"output_ThirdPartyReference": "REF123"
+			}`))
+		}))
+		defer server.Close()
+
+		mock := &mockPublisher{}
+		client := createTestClientWithProducer(t, server.URL, mock, logger)
+
+		paymentID := ids.MustNewPaymentID()
+		rideID := ids.MustNewRideID()
+
+		_, err := client.InitiateWithEvent(context.Background(), paymentID, rideID, phone, amount, "REF123")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if len(mock.publishedEvents) != 1 {
+			t.Errorf("expected 1 published event, got %d", len(mock.publishedEvents))
+		}
+	})
+
+	t.Run("handles publish error gracefully", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"output_TransactionID": "TXN123456",
+				"output_ConversationID": "CONV123456",
+				"output_ResponseCode": "INS-0",
+				"output_ResponseDesc": "Request processed successfully",
+				"output_ThirdPartyReference": "REF123"
+			}`))
+		}))
+		defer server.Close()
+
+		mock := &mockPublisher{
+			publishFunc: func(_ context.Context, _ *envelope.Envelope, _ string) error {
+				return errors.New("publish failed")
+			},
+		}
+		client := createTestClientWithProducer(t, server.URL, mock, logger)
+
+		paymentID := ids.MustNewPaymentID()
+		rideID := ids.MustNewRideID()
+
+		// Should still succeed even if publish fails (logged but not returned)
+		result, err := client.InitiateWithEvent(context.Background(), paymentID, rideID, phone, amount, "REF123")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result == nil {
+			t.Fatal("expected result, got nil")
+		}
+	})
+}
+
+func TestHandleCallbackWithProducer(t *testing.T) {
+	logger := logging.New(logging.Config{Level: slog.LevelDebug})
+
+	t.Run("publishes completed event on success callback", func(t *testing.T) {
+		mock := &mockPublisher{}
+		client := createTestClientWithProducer(t, "http://localhost:8080", mock, logger)
+
+		paymentID := ids.MustNewPaymentID()
+		callback := &Callback{
+			TransactionID: "TXN123",
+			ResponseCode:  ResponseCodeSuccess,
+			ResponseDesc:  "Success",
+		}
+
+		err := client.HandleCallback(context.Background(), paymentID, callback)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if len(mock.publishedEvents) != 1 {
+			t.Errorf("expected 1 published event, got %d", len(mock.publishedEvents))
+		}
+	})
+
+	t.Run("publishes failed event on failure callback", func(t *testing.T) {
+		mock := &mockPublisher{}
+		client := createTestClientWithProducer(t, "http://localhost:8080", mock, logger)
+
+		paymentID := ids.MustNewPaymentID()
+		callback := &Callback{
+			TransactionID: "TXN123",
+			ResponseCode:  "INS-1",
+			ResponseDesc:  "Internal error",
+		}
+
+		err := client.HandleCallback(context.Background(), paymentID, callback)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if len(mock.publishedEvents) != 1 {
+			t.Errorf("expected 1 published event, got %d", len(mock.publishedEvents))
+		}
+	})
+
+	t.Run("returns error when publish completed fails", func(t *testing.T) {
+		mock := &mockPublisher{
+			publishFunc: func(_ context.Context, _ *envelope.Envelope, _ string) error {
+				return errors.New("publish failed")
+			},
+		}
+		client := createTestClientWithProducer(t, "http://localhost:8080", mock, logger)
+
+		paymentID := ids.MustNewPaymentID()
+		callback := &Callback{
+			TransactionID: "TXN123",
+			ResponseCode:  ResponseCodeSuccess,
+		}
+
+		err := client.HandleCallback(context.Background(), paymentID, callback)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("returns error when publish failed fails", func(t *testing.T) {
+		mock := &mockPublisher{
+			publishFunc: func(_ context.Context, _ *envelope.Envelope, _ string) error {
+				return errors.New("publish failed")
+			},
+		}
+		client := createTestClientWithProducer(t, "http://localhost:8080", mock, logger)
+
+		paymentID := ids.MustNewPaymentID()
+		callback := &Callback{
+			TransactionID: "TXN123",
+			ResponseCode:  "INS-1",
+			ResponseDesc:  "Internal error",
+		}
+
+		err := client.HandleCallback(context.Background(), paymentID, callback)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+}
+
+func TestNewClientWithTimeout(t *testing.T) {
+	t.Run("uses custom timeout", func(t *testing.T) {
+		cfg := &Config{
+			APIKey:              "test-api-key",
+			PublicKey:           "test-public-key",
+			ServiceProviderCode: "171717",
+			Timeout:             30 * time.Second,
+		}
+		client, err := NewClient(cfg, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if client.httpClient.Timeout != 30*time.Second {
+			t.Errorf("expected timeout 30s, got %v", client.httpClient.Timeout)
+		}
+	})
+
+	t.Run("uses default timeout when not specified", func(t *testing.T) {
+		cfg := &Config{
+			APIKey:              "test-api-key",
+			PublicKey:           "test-public-key",
+			ServiceProviderCode: "171717",
+		}
+		client, err := NewClient(cfg, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if client.httpClient.Timeout != 60*time.Second {
+			t.Errorf("expected default timeout 60s, got %v", client.httpClient.Timeout)
+		}
+	})
+}
+
 func createTestClient(t *testing.T, testServerURL string) *Client {
 	t.Helper()
 
@@ -541,3 +867,34 @@ func createTestClient(t *testing.T, testServerURL string) *Client {
 	client.SetBaseURL(testServerURL)
 	return client
 }
+
+func createTestClientWithProducer(t *testing.T, testServerURL string, publisher EventPublisher, logger *logging.Logger) *Client {
+	t.Helper()
+
+	cfg := &Config{
+		APIKey:              "test-api-key",
+		PublicKey:           "test-public-key",
+		ServiceProviderCode: "171717",
+		Timeout:             10 * time.Second,
+		Producer:            publisher,
+	}
+	client, err := NewClient(cfg, logger)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	client.SetBaseURL(testServerURL)
+	return client
+}
+
+// testRSAPublicKeyPEM is a test RSA public key in PEM format.
+const testRSAPublicKeyPEM = `-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7
+PmOsIyJBpT0WmSqjQ/mM5fZHmqVx5b9Z0wnZz0aH8s7HH8fPzFrVsXr7O2DwZBhF+B2r2sHJr1Zm
+F8sIxIKOvG0qe9Y3KTTX1y1b4THFZ3sWuE5scRhFbxex1Ybxn3DXvEfQn17a3D9a1vLV9J+JN3Ew
+8e3YF5L3VZzJwJLXxJx3PXTz0wrD5PXD8r3JQ5WqV3Q3n7qJh1F7q5Z6a2B1E5e0qb/GhF/S3q0D
+JmD4wHqL4fZKoA3R9U8v2e3H8BQE4sY7EqXkZfzNBAjMxEr7LCcL7qKB3qF3LFKq1H0rFAx0G+Qu
+EqL4LwIDAQAB
+-----END PUBLIC KEY-----`
+
+// testRSAPublicKeyBase64 is the DER-encoded RSA public key in base64.
+const testRSAPublicKeyBase64 = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7PmOsIyJBpT0WmSqjQ/mM5fZHmqVx5b9Z0wnZz0aH8s7HH8fPzFrVsXr7O2DwZBhF+B2r2sHJr1ZmF8sIxIKOvG0qe9Y3KTTX1y1b4THFZ3sWuE5scRhFbxex1Ybxn3DXvEfQn17a3D9a1vLV9J+JN3Ew8e3YF5L3VZzJwJLXxJx3PXTz0wrD5PXD8r3JQ5WqV3Q3n7qJh1F7q5Z6a2B1E5e0qb/GhF/S3q0DJmD4wHqL4fZKoA3R9U8v2e3H8BQE4sY7EqXkZfzNBAjMxEr7LCcL7qKB3qF3LFKq1H0rFAx0G+QuEqL4LwIDAQAB"

@@ -313,6 +313,66 @@ func TestSetAPIURL(t *testing.T) {
 	}
 }
 
+func TestSetHTTPClient(t *testing.T) {
+	cfg := &Config{
+		APIKey:    "test-api-key",
+		FromEmail: "noreply@txova.co.mz",
+	}
+	client, err := NewClient(cfg, nil)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	customClient := &http.Client{Timeout: 5 * time.Second}
+	client.SetHTTPClient(customClient)
+
+	if client.httpClient != customClient {
+		t.Error("expected custom HTTP client to be set")
+	}
+}
+
+func TestSendRequestErrors(t *testing.T) {
+	email := contact.MustParseEmail("user@example.com")
+
+	t.Run("handles network error", func(t *testing.T) {
+		SetAPIURL("http://localhost:59999") // Invalid port
+		defer ResetAPIURL()
+
+		cfg := &Config{
+			APIKey:    "test-api-key",
+			FromEmail: "noreply@txova.co.mz",
+			Timeout:   100 * time.Millisecond,
+		}
+		client, err := NewClient(cfg, nil)
+		if err != nil {
+			t.Fatalf("failed to create client: %v", err)
+		}
+
+		err = client.Send(context.Background(), email, "Test", "Body")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("handles context cancellation", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			// Block forever
+			select {}
+		}))
+		defer server.Close()
+
+		client := createTestClient(t, server.URL)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+
+		err := client.Send(ctx, email, "Test", "Body")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+}
+
 func createTestClient(t *testing.T, testServerURL string) *Client {
 	t.Helper()
 

@@ -26,6 +26,7 @@ const (
 type Client struct {
 	httpClient *http.Client
 	baseURL    string
+	balanceURL string
 	username   string
 	apiKey     string
 	senderID   string
@@ -75,6 +76,7 @@ func NewClient(cfg *Config, logger *logging.Logger) (*Client, error) {
 	return &Client{
 		httpClient: &http.Client{Timeout: timeout},
 		baseURL:    baseURL,
+		balanceURL: "https://api.africastalking.com/version1/user",
 		username:   cfg.Username,
 		apiKey:     cfg.APIKey,
 		senderID:   cfg.SenderID,
@@ -199,7 +201,7 @@ type Balance struct {
 
 // GetBalance retrieves the account balance.
 func (c *Client) GetBalance(ctx context.Context) (*Balance, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.africastalking.com/version1/user?username="+c.username, http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.balanceURL+"?username="+c.username, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}

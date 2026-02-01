@@ -1,0 +1,389 @@
+package mpesa
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/Dorico-Dynamics/txova-go-types/contact"
+	"github.com/Dorico-Dynamics/txova-go-types/money"
+)
+
+func TestNewClient(t *testing.T) {
+	t.Run("creates client with valid config", func(t *testing.T) {
+		cfg := &Config{
+			APIKey:              "test-api-key",
+			PublicKey:           "test-public-key",
+			ServiceProviderCode: "171717",
+		}
+		client, err := NewClient(cfg, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if client == nil {
+			t.Fatal("expected client, got nil")
+		}
+		if client.baseURL != ProductionBaseURL {
+			t.Errorf("expected production URL, got %s", client.baseURL)
+		}
+	})
+
+	t.Run("uses sandbox URL when enabled", func(t *testing.T) {
+		cfg := &Config{
+			APIKey:              "test-api-key",
+			PublicKey:           "test-public-key",
+			ServiceProviderCode: "171717",
+			Sandbox:             true,
+		}
+		client, err := NewClient(cfg, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if client.baseURL != SandboxBaseURL {
+			t.Errorf("expected sandbox URL, got %s", client.baseURL)
+		}
+	})
+
+	t.Run("returns error with nil config", func(t *testing.T) {
+		_, err := NewClient(nil, nil)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("returns error without API key", func(t *testing.T) {
+		cfg := &Config{
+			PublicKey:           "test-public-key",
+			ServiceProviderCode: "171717",
+		}
+		_, err := NewClient(cfg, nil)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("returns error without public key", func(t *testing.T) {
+		cfg := &Config{
+			APIKey:              "test-api-key",
+			ServiceProviderCode: "171717",
+		}
+		_, err := NewClient(cfg, nil)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("returns error without service provider code", func(t *testing.T) {
+		cfg := &Config{
+			APIKey:    "test-api-key",
+			PublicKey: "test-public-key",
+		}
+		_, err := NewClient(cfg, nil)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+}
+
+func TestInitiate(t *testing.T) {
+	phone := contact.MustParsePhoneNumber("841234567")
+	amount := money.FromMZN(100)
+
+	t.Run("successful initiation", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				t.Errorf("expected POST, got %s", r.Method)
+			}
+			if r.Header.Get("Authorization") == "" {
+				t.Error("missing Authorization header")
+			}
+			if r.Header.Get("Content-Type") != "application/json" {
+				t.Errorf("expected content-type application/json, got %s", r.Header.Get("Content-Type"))
+			}
+
+			var req c2bRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("failed to decode request: %v", err)
+			}
+
+			if req.InputServiceProviderCode != "171717" {
+				t.Errorf("expected service provider code '171717', got %s", req.InputServiceProviderCode)
+			}
+
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"output_TransactionID": "TXN123456",
+				"output_ConversationID": "CONV123456",
+				"output_ResponseCode": "INS-0",
+				"output_ResponseDesc": "Request processed successfully",
+				"output_ThirdPartyReference": "REF123"
+			}`))
+		}))
+		defer server.Close()
+
+		client := createTestClient(t, server.URL)
+		result, err := client.Initiate(context.Background(), phone, amount, "REF123")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if result.TransactionID != "TXN123456" {
+			t.Errorf("expected transaction ID 'TXN123456', got %s", result.TransactionID)
+		}
+		if !result.IsSuccess() {
+			t.Error("expected success")
+		}
+	})
+
+	t.Run("returns error for zero phone", func(t *testing.T) {
+		client := createTestClient(t, "http://localhost:8080")
+		_, err := client.Initiate(context.Background(), contact.PhoneNumber{}, amount, "REF123")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("returns error for zero amount", func(t *testing.T) {
+		client := createTestClient(t, "http://localhost:8080")
+		_, err := client.Initiate(context.Background(), phone, money.Zero(), "REF123")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("returns error for negative amount", func(t *testing.T) {
+		client := createTestClient(t, "http://localhost:8080")
+		_, err := client.Initiate(context.Background(), phone, money.FromMZN(-100), "REF123")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("returns error for empty reference", func(t *testing.T) {
+		client := createTestClient(t, "http://localhost:8080")
+		_, err := client.Initiate(context.Background(), phone, amount, "")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("handles API error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error": "Invalid request"}`))
+		}))
+		defer server.Close()
+
+		client := createTestClient(t, server.URL)
+		_, err := client.Initiate(context.Background(), phone, amount, "REF123")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+}
+
+func TestQuery(t *testing.T) {
+	t.Run("successful query", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				t.Errorf("expected GET, got %s", r.Method)
+			}
+
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"output_TransactionID": "TXN123456",
+				"output_ConversationID": "CONV123456",
+				"output_ResponseCode": "INS-0",
+				"output_ResponseDesc": "Request processed successfully",
+				"output_ThirdPartyReference": "REF123"
+			}`))
+		}))
+		defer server.Close()
+
+		client := createTestClient(t, server.URL)
+		result, err := client.Query(context.Background(), "TXN123456", "REF123")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if result.TransactionID != "TXN123456" {
+			t.Errorf("expected transaction ID 'TXN123456', got %s", result.TransactionID)
+		}
+		if !result.IsSuccess() {
+			t.Error("expected success")
+		}
+	})
+
+	t.Run("returns error for empty transaction ID", func(t *testing.T) {
+		client := createTestClient(t, "http://localhost:8080")
+		_, err := client.Query(context.Background(), "", "REF123")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("returns error for empty third party ref", func(t *testing.T) {
+		client := createTestClient(t, "http://localhost:8080")
+		_, err := client.Query(context.Background(), "TXN123", "")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+}
+
+func TestRefund(t *testing.T) {
+	amount := money.FromMZN(50)
+
+	t.Run("successful refund", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPut {
+				t.Errorf("expected PUT, got %s", r.Method)
+			}
+
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"output_TransactionID": "REV123456",
+				"output_ConversationID": "CONV123456",
+				"output_ResponseCode": "INS-0",
+				"output_ResponseDesc": "Request processed successfully"
+			}`))
+		}))
+		defer server.Close()
+
+		client := createTestClient(t, server.URL)
+		result, err := client.Refund(context.Background(), "TXN123456", amount, "REF123")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if result.TransactionID != "REV123456" {
+			t.Errorf("expected transaction ID 'REV123456', got %s", result.TransactionID)
+		}
+		if !result.IsSuccess() {
+			t.Error("expected success")
+		}
+	})
+
+	t.Run("returns error for empty transaction ID", func(t *testing.T) {
+		client := createTestClient(t, "http://localhost:8080")
+		_, err := client.Refund(context.Background(), "", amount, "REF123")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("returns error for zero amount", func(t *testing.T) {
+		client := createTestClient(t, "http://localhost:8080")
+		_, err := client.Refund(context.Background(), "TXN123", money.Zero(), "REF123")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("returns error for empty third party ref", func(t *testing.T) {
+		client := createTestClient(t, "http://localhost:8080")
+		_, err := client.Refund(context.Background(), "TXN123", amount, "")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+}
+
+func TestParseCallback(t *testing.T) {
+	t.Run("parses valid callback", func(t *testing.T) {
+		body := []byte(`{
+			"output_TransactionID": "TXN123456",
+			"output_ConversationID": "CONV123456",
+			"output_ThirdPartyReference": "REF123",
+			"output_ResponseCode": "INS-0",
+			"output_ResponseDesc": "Success"
+		}`)
+
+		callback, err := ParseCallback(body)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if callback.TransactionID != "TXN123456" {
+			t.Errorf("expected transaction ID 'TXN123456', got %s", callback.TransactionID)
+		}
+		if callback.ResponseCode != "INS-0" {
+			t.Errorf("expected response code 'INS-0', got %s", callback.ResponseCode)
+		}
+	})
+
+	t.Run("returns error for invalid JSON", func(t *testing.T) {
+		_, err := ParseCallback([]byte(`invalid json`))
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+}
+
+func TestResponseCodeDescription(t *testing.T) {
+	tests := []struct {
+		code     string
+		expected string
+	}{
+		{"INS-0", "Request processed successfully"},
+		{"INS-1", "Internal error"},
+		{"INS-9", "Request timeout"},
+		{"INS-10", "Duplicate transaction"},
+		{"UNKNOWN", "Unknown error code: UNKNOWN"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.code, func(t *testing.T) {
+			desc := ResponseCodeDescription(tt.code)
+			if desc != tt.expected {
+				t.Errorf("expected %s, got %s", tt.expected, desc)
+			}
+		})
+	}
+}
+
+func TestFormatPhoneForMPesa(t *testing.T) {
+	phone := contact.MustParsePhoneNumber("841234567")
+	formatted := formatPhoneForMPesa(phone)
+	expected := "258841234567"
+	if formatted != expected {
+		t.Errorf("expected %s, got %s", expected, formatted)
+	}
+}
+
+func TestGenerateTransactionRef(t *testing.T) {
+	ref1 := generateTransactionRef()
+	ref2 := generateTransactionRef()
+
+	if ref1 == ref2 {
+		t.Error("expected unique transaction references")
+	}
+
+	if len(ref1) < 10 {
+		t.Errorf("expected longer reference, got %s", ref1)
+	}
+
+	if ref1[:3] != "TXV" {
+		t.Errorf("expected prefix 'TXV', got %s", ref1[:3])
+	}
+}
+
+func createTestClient(t *testing.T, testServerURL string) *Client {
+	t.Helper()
+
+	cfg := &Config{
+		APIKey:              "test-api-key",
+		PublicKey:           "test-public-key",
+		ServiceProviderCode: "171717",
+		Timeout:             10 * time.Second,
+	}
+	client, err := NewClient(cfg, nil)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	client.SetBaseURL(testServerURL)
+	return client
+}

@@ -17,6 +17,9 @@ const (
 	CircuitHalfOpen
 )
 
+// Default max concurrent probes in half-open state.
+const defaultMaxConcurrentProbes = 1
+
 // String returns the string representation of the circuit state.
 func (s CircuitState) String() string {
 	switch s {
@@ -41,18 +44,27 @@ type CircuitBreaker struct {
 	consecutiveFailures  int
 	consecutiveSuccesses int
 	lastFailureTime      time.Time
+	inFlightProbes       int
+	maxConcurrentProbes  int
 }
 
 // NewCircuitBreaker creates a new CircuitBreaker with the given configuration.
 func NewCircuitBreaker(config *CircuitBreakerConfig) *CircuitBreaker {
+	maxProbes := config.MaxConcurrentProbes
+	if maxProbes <= 0 {
+		maxProbes = defaultMaxConcurrentProbes
+	}
+
 	return &CircuitBreaker{
-		config: *config,
-		state:  CircuitClosed,
+		config:              *config,
+		state:               CircuitClosed,
+		maxConcurrentProbes: maxProbes,
 	}
 }
 
 // Allow checks if a request is allowed to proceed.
 // Returns true if the request should proceed, false if it should be blocked.
+// In half-open state, only a limited number of concurrent probe requests are allowed.
 func (cb *CircuitBreaker) Allow() bool {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
@@ -67,13 +79,21 @@ func (cb *CircuitBreaker) Allow() bool {
 			// Transition to half-open.
 			cb.state = CircuitHalfOpen
 			cb.consecutiveSuccesses = 0
+			cb.inFlightProbes = 0
+			// Allow first probe request.
+			cb.inFlightProbes++
 			return true
 		}
 		return false
 
 	case CircuitHalfOpen:
-		// Allow probe requests in half-open state.
-		return true
+		// Only allow probe requests if under the limit.
+		if cb.inFlightProbes < cb.maxConcurrentProbes {
+			cb.inFlightProbes++
+			return true
+		}
+		// Reject excess probes while half-open.
+		return false
 
 	default:
 		return true
@@ -91,18 +111,24 @@ func (cb *CircuitBreaker) RecordSuccess() {
 		cb.consecutiveFailures = 0
 
 	case CircuitHalfOpen:
+		// Decrement in-flight probes.
+		if cb.inFlightProbes > 0 {
+			cb.inFlightProbes--
+		}
 		cb.consecutiveSuccesses++
 		// If enough successes, close the circuit.
 		if cb.consecutiveSuccesses >= cb.config.SuccessThreshold {
 			cb.state = CircuitClosed
 			cb.consecutiveFailures = 0
 			cb.consecutiveSuccesses = 0
+			cb.inFlightProbes = 0
 		}
 
 	case CircuitOpen:
 		// Should not happen, but handle gracefully.
 		cb.state = CircuitHalfOpen
 		cb.consecutiveSuccesses = 1
+		cb.inFlightProbes = 0
 	}
 }
 
@@ -122,9 +148,14 @@ func (cb *CircuitBreaker) RecordFailure() {
 		}
 
 	case CircuitHalfOpen:
+		// Decrement in-flight probes.
+		if cb.inFlightProbes > 0 {
+			cb.inFlightProbes--
+		}
 		// Failure in half-open state reopens the circuit.
 		cb.state = CircuitOpen
 		cb.consecutiveSuccesses = 0
+		cb.inFlightProbes = 0
 
 	case CircuitOpen:
 		// Already open, just update timestamp.
@@ -152,6 +183,7 @@ func (cb *CircuitBreaker) Reset() {
 	cb.consecutiveFailures = 0
 	cb.consecutiveSuccesses = 0
 	cb.lastFailureTime = time.Time{}
+	cb.inFlightProbes = 0
 }
 
 // Stats returns statistics about the circuit breaker.
@@ -160,6 +192,8 @@ type CircuitBreakerStats struct {
 	ConsecutiveFailures  int
 	ConsecutiveSuccesses int
 	LastFailureTime      time.Time
+	InFlightProbes       int
+	MaxConcurrentProbes  int
 }
 
 // Stats returns the current statistics for the circuit breaker.
@@ -172,5 +206,7 @@ func (cb *CircuitBreaker) Stats() CircuitBreakerStats {
 		ConsecutiveFailures:  cb.consecutiveFailures,
 		ConsecutiveSuccesses: cb.consecutiveSuccesses,
 		LastFailureTime:      cb.lastFailureTime,
+		InFlightProbes:       cb.inFlightProbes,
+		MaxConcurrentProbes:  cb.maxConcurrentProbes,
 	}
 }

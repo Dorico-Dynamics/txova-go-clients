@@ -252,6 +252,7 @@ func TestCircuitBreakerConcurrency(t *testing.T) {
 }
 
 func TestCircuitBreakerAllowInHalfOpen(t *testing.T) {
+	// Default maxConcurrentProbes is 1, so only one probe at a time.
 	cb := NewCircuitBreaker(&CircuitBreakerConfig{
 		FailureThreshold: 1,
 		SuccessThreshold: 2,
@@ -262,12 +263,98 @@ func TestCircuitBreakerAllowInHalfOpen(t *testing.T) {
 
 	time.Sleep(60 * time.Millisecond)
 
+	// First Allow() should return true and transition to half-open.
 	if !cb.Allow() {
 		t.Error("expected first Allow() in HalfOpen to return true")
 	}
 
+	// Second Allow() should return false (probe limit reached).
+	if cb.Allow() {
+		t.Error("expected subsequent Allow() in HalfOpen to return false (probe limit reached)")
+	}
+
+	// After recording success, probe counter decrements and another probe is allowed.
+	cb.RecordSuccess()
+
 	if !cb.Allow() {
-		t.Error("expected subsequent Allow() in HalfOpen to return true")
+		t.Error("expected Allow() to return true after RecordSuccess() decrements probe counter")
+	}
+}
+
+func TestCircuitBreakerMaxConcurrentProbes(t *testing.T) {
+	// Configure multiple concurrent probes.
+	cb := NewCircuitBreaker(&CircuitBreakerConfig{
+		FailureThreshold:    1,
+		SuccessThreshold:    2,
+		Timeout:             50 * time.Millisecond,
+		MaxConcurrentProbes: 3,
+	})
+
+	cb.RecordFailure()
+
+	time.Sleep(60 * time.Millisecond)
+
+	// Should allow up to 3 concurrent probes.
+	if !cb.Allow() {
+		t.Error("expected Allow() #1 to return true")
+	}
+	if !cb.Allow() {
+		t.Error("expected Allow() #2 to return true")
+	}
+	if !cb.Allow() {
+		t.Error("expected Allow() #3 to return true")
+	}
+
+	// Fourth probe should be rejected.
+	if cb.Allow() {
+		t.Error("expected Allow() #4 to return false (max probes reached)")
+	}
+
+	// Verify stats.
+	stats := cb.Stats()
+	if stats.InFlightProbes != 3 {
+		t.Errorf("expected InFlightProbes=3, got %d", stats.InFlightProbes)
+	}
+	if stats.MaxConcurrentProbes != 3 {
+		t.Errorf("expected MaxConcurrentProbes=3, got %d", stats.MaxConcurrentProbes)
+	}
+
+	// Record a success to decrement probe counter.
+	cb.RecordSuccess()
+
+	// Now another probe should be allowed.
+	if !cb.Allow() {
+		t.Error("expected Allow() to return true after probe completed")
+	}
+}
+
+func TestCircuitBreakerProbeCounterOnFailure(t *testing.T) {
+	cb := NewCircuitBreaker(&CircuitBreakerConfig{
+		FailureThreshold:    1,
+		SuccessThreshold:    2,
+		Timeout:             50 * time.Millisecond,
+		MaxConcurrentProbes: 2,
+	})
+
+	cb.RecordFailure()
+
+	time.Sleep(60 * time.Millisecond)
+
+	// Allow first probe.
+	if !cb.Allow() {
+		t.Error("expected Allow() to return true")
+	}
+
+	// Record failure - should reopen circuit and reset probe counter.
+	cb.RecordFailure()
+
+	if cb.State() != CircuitOpen {
+		t.Errorf("expected state Open after probe failure, got %s", cb.State())
+	}
+
+	stats := cb.Stats()
+	if stats.InFlightProbes != 0 {
+		t.Errorf("expected InFlightProbes=0 after reopening, got %d", stats.InFlightProbes)
 	}
 }
 

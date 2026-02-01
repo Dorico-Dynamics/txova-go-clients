@@ -70,6 +70,9 @@ type CircuitBreakerConfig struct {
 	// Timeout is how long the circuit stays open before allowing a probe (default: 30s).
 	Timeout time.Duration
 
+	// MaxConcurrentProbes is the max number of concurrent probe requests in half-open state (default: 1).
+	MaxConcurrentProbes int
+
 	// Name is an identifier for this circuit breaker (used in logging/metrics).
 	Name string
 }

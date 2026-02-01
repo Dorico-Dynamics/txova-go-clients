@@ -237,11 +237,13 @@ func (c *ResendClient) sendEmail(ctx context.Context, req resendEmailRequest) (*
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	c.logger.DebugContext(ctx, "email sent via Resend",
-		"email_id", result.ID,
-		"to", req.To,
-		"subject", req.Subject,
-	)
+	if c.logger != nil {
+		c.logger.DebugContext(ctx, "email sent via Resend",
+			"email_id", result.ID,
+			"to", req.To,
+			"subject", req.Subject,
+		)
+	}
 
 	return &result, nil
 }

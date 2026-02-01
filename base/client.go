@@ -87,110 +87,168 @@ func extractServiceName(baseURL string) string {
 	return u.Host
 }
 
+// ErrBodyNotReplayable is returned when a request with a body cannot be retried
+// because the body cannot be recreated.
+var ErrBodyNotReplayable = fmt.Errorf("request body is not replayable for retries")
+
+// requestState holds state for a request execution.
+type requestState struct {
+	hasBody       bool
+	canReplayBody bool
+	startTime     time.Time
+}
+
 // Do executes an HTTP request with retry logic and circuit breaker.
 func (c *Client) Do(ctx context.Context, req *http.Request) (*Response, error) {
-	startTime := time.Now()
+	state := &requestState{
+		hasBody:       req.Body != nil && req.Body != http.NoBody,
+		canReplayBody: req.GetBody != nil,
+		startTime:     time.Now(),
+	}
 
 	// Check circuit breaker.
 	if c.circuitBreaker != nil && !c.circuitBreaker.Allow() {
-		c.logRequest(ctx, req.Method, req.URL.String(), 0, time.Since(startTime), ErrCircuitOpen(c.serviceName))
+		c.logRequest(ctx, req.Method, req.URL.String(), 0, time.Since(state.startTime), ErrCircuitOpen(c.serviceName))
 		return nil, ErrCircuitOpen(c.serviceName)
 	}
 
-	// Add tracing headers.
-	c.addTracingHeaders(ctx, req)
+	// Check if request body can be replayed for retries.
+	if state.hasBody && !state.canReplayBody && c.retryer.MaxRetries() > 0 {
+		c.logRequest(ctx, req.Method, req.URL.String(), 0, time.Since(state.startTime), ErrBodyNotReplayable)
+		return nil, ErrBodyNotReplayable
+	}
 
-	// Log request start.
+	c.addTracingHeaders(ctx, req)
 	c.logRequestStart(ctx, req)
 
-	var lastResp *http.Response
+	return c.executeWithRetry(ctx, req, state)
+}
+
+// attemptResult holds the result of a single request attempt.
+type attemptResult struct {
+	statusCode int
+	headers    http.Header
+	body       []byte
+	retry      bool
+}
+
+// executeWithRetry executes the request with retry logic.
+func (c *Client) executeWithRetry(ctx context.Context, req *http.Request, state *requestState) (*Response, error) {
 	var lastErr error
 
 	for attempt := 0; attempt <= c.retryer.MaxRetries(); attempt++ {
-		// Check context cancellation.
 		if err := ctx.Err(); err != nil {
-			c.logRequest(ctx, req.Method, req.URL.String(), 0, time.Since(startTime), err)
+			c.logRequest(ctx, req.Method, req.URL.String(), 0, time.Since(state.startTime), err)
 			return nil, ErrTimeoutWrap("context cancelled", err)
 		}
 
-		// Clone request for retry (body needs to be re-readable).
-		reqCopy := req.Clone(ctx)
-
-		// Execute request.
-		resp, err := c.httpClient.Do(reqCopy)
-
+		result, err := c.executeAttempt(ctx, req, state, attempt)
 		if err != nil {
 			lastErr = err
-			lastResp = nil
-
-			// Check if should retry.
-			if c.retryer.ShouldRetry(nil, err, attempt) {
-				c.logRetry(ctx, req.Method, req.URL.String(), attempt, err)
-				if waitErr := c.retryer.Wait(ctx, nil, attempt); waitErr != nil {
-					c.logRequest(ctx, req.Method, req.URL.String(), 0, time.Since(startTime), waitErr)
-					return nil, ErrTimeoutWrap("retry wait cancelled", waitErr)
-				}
-				continue
-			}
-
-			// Record failure and return.
-			c.recordResult(false)
-			c.logRequest(ctx, req.Method, req.URL.String(), 0, time.Since(startTime), err)
-			return nil, ErrTimeoutWrap("request failed", err)
+			continue
 		}
-
-		lastResp = resp
-		lastErr = nil
-
-		// Read response body.
-		body, err := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if err != nil {
-			c.recordResult(false)
-			c.logRequest(ctx, req.Method, req.URL.String(), resp.StatusCode, time.Since(startTime), err)
-			return nil, ErrBadGatewayWrap("failed to read response body", err)
-		}
-
-		// Check if should retry based on status code.
-		if c.retryer.ShouldRetry(resp, nil, attempt) {
-			c.logRetry(ctx, req.Method, req.URL.String(), attempt, fmt.Errorf("status %d", resp.StatusCode))
-			if waitErr := c.retryer.Wait(ctx, resp, attempt); waitErr != nil {
-				c.logRequest(ctx, req.Method, req.URL.String(), resp.StatusCode, time.Since(startTime), waitErr)
-				return nil, ErrTimeoutWrap("retry wait cancelled", waitErr)
-			}
+		if result.retry {
 			continue
 		}
 
-		// Create response.
-		response := &Response{
-			StatusCode: resp.StatusCode,
-			Headers:    resp.Header,
-			Body:       body,
-		}
-
-		// Record success/failure for circuit breaker.
-		isSuccess := resp.StatusCode >= 200 && resp.StatusCode < 500
-		c.recordResult(isSuccess)
-
-		// Log request completion.
-		var logErr error
-		if resp.StatusCode >= 400 {
-			logErr = MapHTTPStatus(resp.StatusCode, body)
-		}
-		c.logRequest(ctx, req.Method, req.URL.String(), resp.StatusCode, time.Since(startTime), logErr)
-
-		return response, nil
+		return c.handleResponse(ctx, req, result, state)
 	}
 
-	// All retries exhausted.
+	return c.handleRetriesExhausted(ctx, req, lastErr, state)
+}
+
+// executeAttempt executes a single request attempt.
+func (c *Client) executeAttempt(ctx context.Context, req *http.Request, state *requestState, attempt int) (*attemptResult, error) {
+	reqCopy := req.Clone(ctx)
+
+	// Recreate the body for each attempt.
+	if state.hasBody && state.canReplayBody {
+		newBody, err := req.GetBody()
+		if err != nil {
+			c.logRequest(ctx, req.Method, req.URL.String(), 0, time.Since(state.startTime), err)
+			return nil, fmt.Errorf("failed to recreate request body: %w", err)
+		}
+		reqCopy.Body = newBody
+	}
+
+	resp, err := c.httpClient.Do(reqCopy)
+	if err != nil {
+		if reqCopy.Body != nil {
+			_ = reqCopy.Body.Close()
+		}
+		return c.handleRequestError(ctx, req, err, state, attempt)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.recordResult(false)
+		c.logRequest(ctx, req.Method, req.URL.String(), resp.StatusCode, time.Since(state.startTime), err)
+		return nil, ErrBadGatewayWrap("failed to read response body", err)
+	}
+
+	// Check if should retry based on status code.
+	if c.retryer.ShouldRetry(resp, nil, attempt) {
+		c.logRetry(ctx, req.Method, req.URL.String(), attempt, fmt.Errorf("status %d", resp.StatusCode))
+		if waitErr := c.retryer.Wait(ctx, resp, attempt); waitErr != nil {
+			c.logRequest(ctx, req.Method, req.URL.String(), resp.StatusCode, time.Since(state.startTime), waitErr)
+			return nil, ErrTimeoutWrap("retry wait cancelled", waitErr)
+		}
+		return &attemptResult{retry: true}, nil
+	}
+
+	return &attemptResult{
+		statusCode: resp.StatusCode,
+		headers:    resp.Header,
+		body:       body,
+	}, nil
+}
+
+// handleRequestError handles errors from httpClient.Do.
+func (c *Client) handleRequestError(ctx context.Context, req *http.Request, err error, state *requestState, attempt int) (*attemptResult, error) {
+	if c.retryer.ShouldRetry(nil, err, attempt) {
+		c.logRetry(ctx, req.Method, req.URL.String(), attempt, err)
+		if waitErr := c.retryer.Wait(ctx, nil, attempt); waitErr != nil {
+			c.logRequest(ctx, req.Method, req.URL.String(), 0, time.Since(state.startTime), waitErr)
+			return nil, ErrTimeoutWrap("retry wait cancelled", waitErr)
+		}
+		return &attemptResult{retry: true}, nil
+	}
+
+	c.recordResult(false)
+	c.logRequest(ctx, req.Method, req.URL.String(), 0, time.Since(state.startTime), err)
+	return nil, ErrTimeoutWrap("request failed", err)
+}
+
+// handleResponse processes a successful response.
+func (c *Client) handleResponse(ctx context.Context, req *http.Request, result *attemptResult, state *requestState) (*Response, error) {
+	response := &Response{
+		StatusCode: result.statusCode,
+		Headers:    result.headers,
+		Body:       result.body,
+	}
+
+	isSuccess := result.statusCode >= 200 && result.statusCode < 500
+	c.recordResult(isSuccess)
+
+	var logErr error
+	if result.statusCode >= 400 {
+		logErr = MapHTTPStatus(result.statusCode, result.body)
+	}
+	c.logRequest(ctx, req.Method, req.URL.String(), result.statusCode, time.Since(state.startTime), logErr)
+
+	return response, nil
+}
+
+// handleRetriesExhausted handles the case when all retries are exhausted.
+func (c *Client) handleRetriesExhausted(ctx context.Context, req *http.Request, lastErr error, state *requestState) (*Response, error) {
 	c.recordResult(false)
 	if lastErr != nil {
-		c.logRequest(ctx, req.Method, req.URL.String(), 0, time.Since(startTime), lastErr)
+		c.logRequest(ctx, req.Method, req.URL.String(), 0, time.Since(state.startTime), lastErr)
 		return nil, ErrTimeoutWrap("all retries exhausted", lastErr)
 	}
 
-	// Should not reach here, but handle gracefully.
-	c.logRequest(ctx, req.Method, req.URL.String(), lastResp.StatusCode, time.Since(startTime), nil)
+	c.logRequest(ctx, req.Method, req.URL.String(), 0, time.Since(state.startTime), nil)
 	return nil, ErrTimeout("all retries exhausted")
 }
 
@@ -372,8 +430,10 @@ func (r *Request) Do() (*Response, error) {
 
 	// Build body.
 	var bodyReader io.Reader
+	var bodyBytes []byte
 	if r.body != nil {
-		bodyBytes, err := json.Marshal(r.body)
+		var err error
+		bodyBytes, err = json.Marshal(r.body)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal request body: %w", err)
 		}
@@ -384,6 +444,14 @@ func (r *Request) Do() (*Response, error) {
 	req, err := http.NewRequestWithContext(r.ctx, r.method, fullURL, bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Set GetBody function to allow body replay for retries.
+	if bodyBytes != nil {
+		req.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(bodyBytes)), nil
+		}
+		req.ContentLength = int64(len(bodyBytes))
 	}
 
 	// Set headers.

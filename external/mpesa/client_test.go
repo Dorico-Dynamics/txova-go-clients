@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Dorico-Dynamics/txova-go-types/contact"
+	"github.com/Dorico-Dynamics/txova-go-types/ids"
 	"github.com/Dorico-Dynamics/txova-go-types/money"
 )
 
@@ -368,6 +369,159 @@ func TestGenerateTransactionRef(t *testing.T) {
 
 	if ref1[:3] != "TXV" {
 		t.Errorf("expected prefix 'TXV', got %s", ref1[:3])
+	}
+}
+
+func TestHandleCallback(t *testing.T) {
+	t.Run("returns error for nil callback", func(t *testing.T) {
+		client := createTestClient(t, "http://localhost:8080")
+		err := client.HandleCallback(context.Background(), ids.PaymentID{}, nil)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if err.Error() != "callback is required" {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("returns nil when no producer configured", func(t *testing.T) {
+		client := createTestClient(t, "http://localhost:8080")
+		callback := &Callback{
+			TransactionID: "TXN123",
+			ResponseCode:  ResponseCodeSuccess,
+		}
+		err := client.HandleCallback(context.Background(), ids.PaymentID{}, callback)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("handles failed callback without producer", func(t *testing.T) {
+		client := createTestClient(t, "http://localhost:8080")
+		callback := &Callback{
+			TransactionID: "TXN123",
+			ResponseCode:  "INS-1",
+			ResponseDesc:  "Internal error",
+		}
+		err := client.HandleCallback(context.Background(), ids.PaymentID{}, callback)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
+
+func TestInitiateWithEvent(t *testing.T) {
+	phone := contact.MustParsePhoneNumber("841234567")
+	amount := money.FromMZN(100)
+
+	t.Run("successful initiation without producer", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"output_TransactionID": "TXN123456",
+				"output_ConversationID": "CONV123456",
+				"output_ResponseCode": "INS-0",
+				"output_ResponseDesc": "Request processed successfully",
+				"output_ThirdPartyReference": "REF123"
+			}`))
+		}))
+		defer server.Close()
+
+		client := createTestClient(t, server.URL)
+		paymentID := ids.MustNewPaymentID()
+		rideID := ids.MustNewRideID()
+
+		result, err := client.InitiateWithEvent(context.Background(), paymentID, rideID, phone, amount, "REF123")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if result.TransactionID != "TXN123456" {
+			t.Errorf("expected transaction ID 'TXN123456', got %s", result.TransactionID)
+		}
+	})
+
+	t.Run("returns error on API failure", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error": "Invalid request"}`))
+		}))
+		defer server.Close()
+
+		client := createTestClient(t, server.URL)
+		paymentID := ids.MustNewPaymentID()
+		rideID := ids.MustNewRideID()
+
+		_, err := client.InitiateWithEvent(context.Background(), paymentID, rideID, phone, amount, "REF123")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+}
+
+func TestInitiateResultIsSuccess(t *testing.T) {
+	t.Run("returns true for success code", func(t *testing.T) {
+		result := &InitiateResult{ResponseCode: ResponseCodeSuccess}
+		if !result.IsSuccess() {
+			t.Error("expected IsSuccess to return true")
+		}
+	})
+
+	t.Run("returns false for failure code", func(t *testing.T) {
+		result := &InitiateResult{ResponseCode: "INS-1"}
+		if result.IsSuccess() {
+			t.Error("expected IsSuccess to return false")
+		}
+	})
+}
+
+func TestTransactionStatusIsSuccess(t *testing.T) {
+	t.Run("returns true for success code", func(t *testing.T) {
+		status := &TransactionStatus{ResponseCode: ResponseCodeSuccess}
+		if !status.IsSuccess() {
+			t.Error("expected IsSuccess to return true")
+		}
+	})
+
+	t.Run("returns false for failure code", func(t *testing.T) {
+		status := &TransactionStatus{ResponseCode: "INS-1"}
+		if status.IsSuccess() {
+			t.Error("expected IsSuccess to return false")
+		}
+	})
+}
+
+func TestRefundResultIsSuccess(t *testing.T) {
+	t.Run("returns true for success code", func(t *testing.T) {
+		result := &RefundResult{ResponseCode: ResponseCodeSuccess}
+		if !result.IsSuccess() {
+			t.Error("expected IsSuccess to return true")
+		}
+	})
+
+	t.Run("returns false for failure code", func(t *testing.T) {
+		result := &RefundResult{ResponseCode: "INS-1"}
+		if result.IsSuccess() {
+			t.Error("expected IsSuccess to return false")
+		}
+	})
+}
+
+func TestSetHTTPClient(t *testing.T) {
+	client := createTestClient(t, "http://localhost:8080")
+	customClient := &http.Client{Timeout: 5 * time.Second}
+	client.SetHTTPClient(customClient)
+	if client.httpClient != customClient {
+		t.Error("expected custom HTTP client to be set")
+	}
+}
+
+func TestSetBaseURL(t *testing.T) {
+	client := createTestClient(t, "http://localhost:8080")
+	newURL := "http://newurl.example.com"
+	client.SetBaseURL(newURL)
+	if client.baseURL != newURL {
+		t.Errorf("expected base URL %s, got %s", newURL, client.baseURL)
 	}
 }
 

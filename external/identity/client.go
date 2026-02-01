@@ -90,19 +90,36 @@ const (
 )
 
 // JobType represents the type of verification job.
+// Values are based on Smile Identity API documentation.
+// See: https://docs.smileidentity.com/products/for-individuals-background-check/job-types
 type JobType int
 
 const (
-	// JobTypeBiometricKYC verifies ID and compares selfie to ID photo.
+	// JobTypeBiometricKYC (job_type=1) verifies ID and compares selfie to ID photo.
 	JobTypeBiometricKYC JobType = 1
-	// JobTypeDocumentVerification verifies ID document authenticity.
-	JobTypeDocumentVerification JobType = 6
-	// JobTypeBasicKYC verifies ID information only.
-	JobTypeBasicKYC JobType = 5
-	// JobTypeEnhancedKYC queries ID authority for more information.
-	JobTypeEnhancedKYC JobType = 5
-	// JobTypeSmartSelfieAuthentication compares selfies for authentication.
+
+	// JobTypeSmartSelfieAuthentication (job_type=2) compares a new selfie against
+	// a previously enrolled selfie for authentication purposes.
 	JobTypeSmartSelfieAuthentication JobType = 2
+
+	// JobTypeSmartSelfieRegistration (job_type=4) enrolls a user's selfie for
+	// future authentication comparisons.
+	JobTypeSmartSelfieRegistration JobType = 4
+
+	// JobTypeEnhancedKYC (job_type=5) queries ID authority for detailed information
+	// without requiring photos. This is an ID-only verification.
+	JobTypeEnhancedKYC JobType = 5
+
+	// JobTypeDocumentVerification (job_type=6) verifies ID document authenticity
+	// by analyzing the document image.
+	JobTypeDocumentVerification JobType = 6
+
+	// JobTypeBiometricKYCWithDocVerification (job_type=7) combines biometric KYC
+	// with document verification for enhanced security.
+	JobTypeBiometricKYCWithDocVerification JobType = 7
+
+	// Note: JobTypeBasicKYC was removed as it is not a valid Smile Identity job type.
+	// Basic KYC functionality is handled by JobTypeEnhancedKYC (job_type=5).
 )
 
 // VerificationResult represents the result of an ID verification.
@@ -401,6 +418,14 @@ func (c *Client) GetVerificationStatus(ctx context.Context, jobID, userID string
 	return &result, nil
 }
 
+// apiErrorResponse represents the error response from Smile Identity API.
+// Only non-PII fields are included.
+type apiErrorResponse struct {
+	Code    string `json:"code"`
+	Error   string `json:"error"`
+	Message string `json:"message"`
+}
+
 // doRequest performs an HTTP POST request to the Smile Identity API.
 func (c *Client) doRequest(ctx context.Context, path string, body, result any) error {
 	var reqBody io.Reader
@@ -431,7 +456,7 @@ func (c *Client) doRequest(ctx context.Context, path string, body, result any) e
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("smile identity API error: status %d, body: %s", resp.StatusCode, string(respBody))
+		return c.parseAPIError(resp.StatusCode, respBody)
 	}
 
 	if result != nil {
@@ -441,6 +466,29 @@ func (c *Client) doRequest(ctx context.Context, path string, body, result any) e
 	}
 
 	return nil
+}
+
+// parseAPIError extracts only non-PII fields from the error response.
+func (c *Client) parseAPIError(statusCode int, respBody []byte) error {
+	var apiErr apiErrorResponse
+	if err := json.Unmarshal(respBody, &apiErr); err != nil {
+		// Cannot parse response, return generic error without body.
+		return fmt.Errorf("smile identity API error: status %d", statusCode)
+	}
+
+	// Build error message from non-PII fields only.
+	if apiErr.Code != "" && apiErr.Error != "" {
+		return fmt.Errorf("smile identity API error: status %d, code: %s, error: %s", statusCode, apiErr.Code, apiErr.Error)
+	}
+	if apiErr.Message != "" {
+		return fmt.Errorf("smile identity API error: status %d, message: %s", statusCode, apiErr.Message)
+	}
+	if apiErr.Error != "" {
+		return fmt.Errorf("smile identity API error: status %d, error: %s", statusCode, apiErr.Error)
+	}
+
+	// No parseable error fields, return generic error.
+	return fmt.Errorf("smile identity API error: status %d", statusCode)
 }
 
 // generateSignature generates an HMAC-SHA256 signature for API authentication.

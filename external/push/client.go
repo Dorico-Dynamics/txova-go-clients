@@ -20,6 +20,7 @@ type Client struct {
 	httpClient  *http.Client
 	projectID   string
 	accessToken string
+	apiURL      string
 	logger      *logging.Logger
 }
 
@@ -57,6 +58,7 @@ func NewClient(cfg *Config, logger *logging.Logger) (*Client, error) {
 		httpClient:  &http.Client{Timeout: timeout},
 		projectID:   cfg.ProjectID,
 		accessToken: cfg.AccessToken,
+		apiURL:      fcmAPIURL,
 		logger:      logger,
 	}, nil
 }
@@ -230,9 +232,6 @@ func (c *Client) SendMulticast(ctx context.Context, tokens []string, notificatio
 	return result, nil
 }
 
-// apiURL is the URL for the FCM API (can be overridden for testing).
-var apiURL = fcmAPIURL
-
 func (c *Client) sendMessage(ctx context.Context, msg Message) (*SendResult, error) {
 	reqBody := fcmRequest{Message: msg}
 
@@ -241,7 +240,7 @@ func (c *Client) sendMessage(ctx context.Context, msg Message) (*SendResult, err
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	url := fmt.Sprintf(apiURL, c.projectID)
+	url := fmt.Sprintf(c.apiURL, c.projectID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -316,14 +315,15 @@ func PaymentReceivedNotification(amount string) *Notification {
 	}
 }
 
-// SetAPIURL sets a custom API URL (useful for testing).
-func SetAPIURL(url string) {
-	apiURL = url
+// SetAPIURL sets a custom API URL for this client instance (useful for testing).
+// The URL should contain a %s placeholder for the project ID.
+func (c *Client) SetAPIURL(url string) {
+	c.apiURL = url
 }
 
-// ResetAPIURL resets the API URL to the default.
-func ResetAPIURL() {
-	apiURL = fcmAPIURL
+// ResetAPIURL resets the API URL to the default FCM endpoint.
+func (c *Client) ResetAPIURL() {
+	c.apiURL = fcmAPIURL
 }
 
 // SetHTTPClient sets a custom HTTP client (useful for testing).

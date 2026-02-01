@@ -37,6 +37,7 @@ func TestNewClient(t *testing.T) {
 			APIKey:              "test-api-key",
 			PublicKey:           "test-public-key",
 			ServiceProviderCode: "171717",
+			Origin:              "developer.mpesa.vm.co.mz",
 		}
 		client, err := NewClient(cfg, nil)
 		if err != nil {
@@ -55,6 +56,7 @@ func TestNewClient(t *testing.T) {
 			APIKey:              "test-api-key",
 			PublicKey:           "test-public-key",
 			ServiceProviderCode: "171717",
+			Origin:              "developer.mpesa.vm.co.mz",
 			Sandbox:             true,
 		}
 		client, err := NewClient(cfg, nil)
@@ -77,6 +79,7 @@ func TestNewClient(t *testing.T) {
 		cfg := &Config{
 			PublicKey:           "test-public-key",
 			ServiceProviderCode: "171717",
+			Origin:              "developer.mpesa.vm.co.mz",
 		}
 		_, err := NewClient(cfg, nil)
 		if err == nil {
@@ -88,6 +91,7 @@ func TestNewClient(t *testing.T) {
 		cfg := &Config{
 			APIKey:              "test-api-key",
 			ServiceProviderCode: "171717",
+			Origin:              "developer.mpesa.vm.co.mz",
 		}
 		_, err := NewClient(cfg, nil)
 		if err == nil {
@@ -99,6 +103,19 @@ func TestNewClient(t *testing.T) {
 		cfg := &Config{
 			APIKey:    "test-api-key",
 			PublicKey: "test-public-key",
+			Origin:    "developer.mpesa.vm.co.mz",
+		}
+		_, err := NewClient(cfg, nil)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("returns error without origin", func(t *testing.T) {
+		cfg := &Config{
+			APIKey:              "test-api-key",
+			PublicKey:           "test-public-key",
+			ServiceProviderCode: "171717",
 		}
 		_, err := NewClient(cfg, nil)
 		if err == nil {
@@ -544,12 +561,13 @@ func TestSetBaseURL(t *testing.T) {
 }
 
 func TestEncryptAPIKey(t *testing.T) {
-	// Test with valid PEM-encoded RSA public key
+	// Test with valid PEM-encoded RSA public key.
 	t.Run("encrypts with valid PEM key", func(t *testing.T) {
 		cfg := &Config{
 			APIKey:              "test-api-key",
 			PublicKey:           testRSAPublicKeyPEM,
 			ServiceProviderCode: "171717",
+			Origin:              "developer.mpesa.vm.co.mz",
 		}
 		client, err := NewClient(cfg, nil)
 		if err != nil {
@@ -561,7 +579,7 @@ func TestEncryptAPIKey(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		// Encrypted result should be base64 encoded and different from original
+		// Encrypted result should be base64 encoded and different from original.
 		if encrypted == "test-api-key" {
 			t.Error("expected encrypted key to be different from original")
 		}
@@ -570,18 +588,43 @@ func TestEncryptAPIKey(t *testing.T) {
 		}
 	})
 
-	t.Run("falls back gracefully with invalid key", func(t *testing.T) {
+	t.Run("returns error with invalid key when AllowUnencryptedAPIKey is false", func(t *testing.T) {
 		cfg := &Config{
-			APIKey:              "test-api-key",
-			PublicKey:           "not-a-valid-key",
-			ServiceProviderCode: "171717",
+			APIKey:                 "test-api-key",
+			PublicKey:              "not-a-valid-key",
+			ServiceProviderCode:    "171717",
+			Origin:                 "developer.mpesa.vm.co.mz",
+			AllowUnencryptedAPIKey: false,
 		}
 		client, err := NewClient(cfg, nil)
 		if err != nil {
 			t.Fatalf("failed to create client: %v", err)
 		}
 
-		// Should fall back to returning API key as-is
+		// Should return error when encryption fails.
+		_, err = client.encryptAPIKey()
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !errors.Is(err, ErrEncryptionFailed) {
+			t.Errorf("expected ErrEncryptionFailed, got %v", err)
+		}
+	})
+
+	t.Run("falls back to API key when AllowUnencryptedAPIKey is true", func(t *testing.T) {
+		cfg := &Config{
+			APIKey:                 "test-api-key",
+			PublicKey:              "not-a-valid-key",
+			ServiceProviderCode:    "171717",
+			Origin:                 "developer.mpesa.vm.co.mz",
+			AllowUnencryptedAPIKey: true,
+		}
+		client, err := NewClient(cfg, nil)
+		if err != nil {
+			t.Fatalf("failed to create client: %v", err)
+		}
+
+		// Should fall back to returning API key as-is.
 		encrypted, err := client.encryptAPIKey()
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -596,6 +639,7 @@ func TestEncryptAPIKey(t *testing.T) {
 			APIKey:              "test-api-key",
 			PublicKey:           testRSAPublicKeyBase64,
 			ServiceProviderCode: "171717",
+			Origin:              "developer.mpesa.vm.co.mz",
 		}
 		client, err := NewClient(cfg, nil)
 		if err != nil {
@@ -824,6 +868,7 @@ func TestNewClientWithTimeout(t *testing.T) {
 			APIKey:              "test-api-key",
 			PublicKey:           "test-public-key",
 			ServiceProviderCode: "171717",
+			Origin:              "developer.mpesa.vm.co.mz",
 			Timeout:             30 * time.Second,
 		}
 		client, err := NewClient(cfg, nil)
@@ -840,6 +885,7 @@ func TestNewClientWithTimeout(t *testing.T) {
 			APIKey:              "test-api-key",
 			PublicKey:           "test-public-key",
 			ServiceProviderCode: "171717",
+			Origin:              "developer.mpesa.vm.co.mz",
 		}
 		client, err := NewClient(cfg, nil)
 		if err != nil {
@@ -855,10 +901,12 @@ func createTestClient(t *testing.T, testServerURL string) *Client {
 	t.Helper()
 
 	cfg := &Config{
-		APIKey:              "test-api-key",
-		PublicKey:           "test-public-key",
-		ServiceProviderCode: "171717",
-		Timeout:             10 * time.Second,
+		APIKey:                 "test-api-key",
+		PublicKey:              "test-public-key",
+		ServiceProviderCode:    "171717",
+		Origin:                 "developer.mpesa.vm.co.mz",
+		Timeout:                10 * time.Second,
+		AllowUnencryptedAPIKey: true, // Allow fallback for testing.
 	}
 	client, err := NewClient(cfg, nil)
 	if err != nil {
@@ -872,11 +920,13 @@ func createTestClientWithProducer(t *testing.T, testServerURL string, publisher 
 	t.Helper()
 
 	cfg := &Config{
-		APIKey:              "test-api-key",
-		PublicKey:           "test-public-key",
-		ServiceProviderCode: "171717",
-		Timeout:             10 * time.Second,
-		Producer:            publisher,
+		APIKey:                 "test-api-key",
+		PublicKey:              "test-public-key",
+		ServiceProviderCode:    "171717",
+		Origin:                 "developer.mpesa.vm.co.mz",
+		Timeout:                10 * time.Second,
+		Producer:               publisher,
+		AllowUnencryptedAPIKey: true, // Allow fallback for testing.
 	}
 	client, err := NewClient(cfg, logger)
 	if err != nil {

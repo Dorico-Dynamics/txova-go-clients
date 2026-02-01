@@ -38,13 +38,15 @@ type EventPublisher interface {
 
 // Client is the M-Pesa client.
 type Client struct {
-	httpClient          *http.Client
-	baseURL             string
-	apiKey              string
-	publicKey           string
-	serviceProviderCode string
-	logger              *logging.Logger
-	producer            EventPublisher
+	httpClient             *http.Client
+	baseURL                string
+	apiKey                 string
+	publicKey              string
+	serviceProviderCode    string
+	origin                 string
+	allowUnencryptedAPIKey bool
+	logger                 *logging.Logger
+	producer               EventPublisher
 }
 
 // Config holds the configuration for the M-Pesa client.
@@ -58,6 +60,10 @@ type Config struct {
 	// ServiceProviderCode is the M-Pesa service provider code (required).
 	ServiceProviderCode string
 
+	// Origin is the registered origin for M-Pesa API requests (required).
+	// This should be the domain registered with M-Pesa (e.g., "developer.mpesa.vm.co.mz").
+	Origin string
+
 	// Sandbox enables sandbox mode for testing.
 	Sandbox bool
 
@@ -67,6 +73,11 @@ type Config struct {
 	// Producer is the Kafka producer for event publishing (optional).
 	// If nil, events will not be published.
 	Producer EventPublisher
+
+	// AllowUnencryptedAPIKey allows returning the API key unencrypted when RSA
+	// encryption fails. This should only be enabled for testing with mock servers.
+	// In production, this MUST be false (default).
+	AllowUnencryptedAPIKey bool
 }
 
 // NewClient creates a new M-Pesa client.
@@ -83,6 +94,9 @@ func NewClient(cfg *Config, logger *logging.Logger) (*Client, error) {
 	if cfg.ServiceProviderCode == "" {
 		return nil, fmt.Errorf("service provider code is required")
 	}
+	if cfg.Origin == "" {
+		return nil, fmt.Errorf("origin is required")
+	}
 
 	timeout := cfg.Timeout
 	if timeout == 0 {
@@ -95,13 +109,15 @@ func NewClient(cfg *Config, logger *logging.Logger) (*Client, error) {
 	}
 
 	return &Client{
-		httpClient:          &http.Client{Timeout: timeout},
-		baseURL:             baseURL,
-		apiKey:              cfg.APIKey,
-		publicKey:           cfg.PublicKey,
-		serviceProviderCode: cfg.ServiceProviderCode,
-		logger:              logger,
-		producer:            cfg.Producer,
+		httpClient:             &http.Client{Timeout: timeout},
+		baseURL:                baseURL,
+		apiKey:                 cfg.APIKey,
+		publicKey:              cfg.PublicKey,
+		serviceProviderCode:    cfg.ServiceProviderCode,
+		origin:                 cfg.Origin,
+		allowUnencryptedAPIKey: cfg.AllowUnencryptedAPIKey,
+		logger:                 logger,
+		producer:               cfg.Producer,
 	}, nil
 }
 
@@ -351,7 +367,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body, resul
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+bearerToken)
-	req.Header.Set("Origin", "*")
+	req.Header.Set("Origin", c.origin)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -404,30 +420,43 @@ func (c *Client) encryptAPIKey() (string, error) {
 	return base64.StdEncoding.EncodeToString(encrypted), nil
 }
 
+// ErrEncryptionFailed is returned when API key encryption fails.
+var ErrEncryptionFailed = fmt.Errorf("failed to encrypt API key")
+
 // encryptWithRawKey tries to encrypt with a raw base64 encoded key.
-// Falls back to returning API key as-is for testing scenarios where
-// the public key may not be a valid RSA key.
+// Returns an error if encryption fails, unless AllowUnencryptedAPIKey is enabled.
 func (c *Client) encryptWithRawKey() (string, error) {
-	// Decode base64 public key
+	// Decode base64 public key.
 	keyBytes, err := base64.StdEncoding.DecodeString(c.publicKey)
 	if err != nil {
-		// Return the API key as-is if we can't decode (for testing)
-		return c.apiKey, nil //nolint:nilerr // intentional fallback for testing
+		if c.allowUnencryptedAPIKey {
+			return c.apiKey, nil
+		}
+		return "", fmt.Errorf("%w: failed to decode public key: %w", ErrEncryptionFailed, err)
 	}
 
 	pub, err := x509.ParsePKIXPublicKey(keyBytes)
 	if err != nil {
-		return c.apiKey, nil //nolint:nilerr // intentional fallback for testing
+		if c.allowUnencryptedAPIKey {
+			return c.apiKey, nil
+		}
+		return "", fmt.Errorf("%w: failed to parse public key: %w", ErrEncryptionFailed, err)
 	}
 
 	rsaPub, ok := pub.(*rsa.PublicKey)
 	if !ok {
-		return c.apiKey, nil
+		if c.allowUnencryptedAPIKey {
+			return c.apiKey, nil
+		}
+		return "", fmt.Errorf("%w: not an RSA public key", ErrEncryptionFailed)
 	}
 
 	encrypted, err := rsa.EncryptPKCS1v15(rand.Reader, rsaPub, []byte(c.apiKey))
 	if err != nil {
-		return c.apiKey, nil //nolint:nilerr // intentional fallback for testing
+		if c.allowUnencryptedAPIKey {
+			return c.apiKey, nil
+		}
+		return "", fmt.Errorf("%w: RSA encryption failed: %w", ErrEncryptionFailed, err)
 	}
 
 	return base64.StdEncoding.EncodeToString(encrypted), nil
@@ -537,17 +566,17 @@ func (c *Client) publishPaymentFailed(ctx context.Context, paymentID ids.Payment
 
 // IsSuccess returns true if the response indicates success.
 func (r *InitiateResult) IsSuccess() bool {
-	return r.ResponseCode == "INS-0"
+	return r.ResponseCode == ResponseCodeSuccess
 }
 
 // IsSuccess returns true if the status indicates success.
 func (s *TransactionStatus) IsSuccess() bool {
-	return s.ResponseCode == "INS-0"
+	return s.ResponseCode == ResponseCodeSuccess
 }
 
 // IsSuccess returns true if the refund was successful.
 func (r *RefundResult) IsSuccess() bool {
-	return r.ResponseCode == "INS-0"
+	return r.ResponseCode == ResponseCodeSuccess
 }
 
 // Common M-Pesa response codes.

@@ -326,24 +326,30 @@ func TestNotificationHelpers(t *testing.T) {
 }
 
 func TestSetAPIURL(t *testing.T) {
-	original := apiURL
+	cfg := &Config{
+		ProjectID:   "test-project",
+		AccessToken: "test-token",
+	}
+	client, err := NewClient(cfg, nil)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
 
-	SetAPIURL("https://test.example.com/%s/messages:send")
-	if apiURL == original {
+	original := client.apiURL
+
+	client.SetAPIURL("https://test.example.com/%s/messages:send")
+	if client.apiURL == original {
 		t.Error("expected URL to be changed")
 	}
 
-	ResetAPIURL()
-	if apiURL != original {
+	client.ResetAPIURL()
+	if client.apiURL != original {
 		t.Error("expected URL to be reset")
 	}
 }
 
 func createTestClient(t *testing.T, testServerURL string) *Client {
 	t.Helper()
-
-	SetAPIURL(testServerURL + "/%s/messages:send")
-	t.Cleanup(ResetAPIURL)
 
 	cfg := &Config{
 		ProjectID:   "test-project",
@@ -354,5 +360,8 @@ func createTestClient(t *testing.T, testServerURL string) *Client {
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}
+
+	client.SetAPIURL(testServerURL + "/%s/messages:send")
+
 	return client
 }

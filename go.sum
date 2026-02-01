@@ -1,0 +1,6 @@
+github.com/Dorico-Dynamics/txova-go-core v1.0.0 h1:xPyNhHKu3zIUQ9R4b9flzd251gJn32vs1HX/Vzttf6M=
+github.com/Dorico-Dynamics/txova-go-core v1.0.0/go.mod h1:Rwqq+wnlM+AETcwuhqKGHJOh8ljJ8GOG2hTvWgPUQTM=
+github.com/Dorico-Dynamics/txova-go-kafka v0.2.0 h1:+cZDC1gcLkUWBIVct20GTj23N9t7t/a8+h20rT9ZiR0=
+github.com/Dorico-Dynamics/txova-go-kafka v0.2.0/go.mod h1:UbBLwqrfnIuC5gwOwMgbVt59YS8CuGZ1T+1aQczVHPo=
+github.com/Dorico-Dynamics/txova-go-types v1.1.2 h1:TwCagZrVoxyuamswvGPI4JfnZ5gkRGeDl0halTmk/3g=
+github.com/Dorico-Dynamics/txova-go-types v1.1.2/go.mod h1:WkWIOXLkVwFu1wyLGm9U2R2dTECuTtEJTR8rIiA+dBw=

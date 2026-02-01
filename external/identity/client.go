@@ -291,11 +291,13 @@ type imageEntry struct {
 	Image       string `json:"image"` // Base64 encoded
 }
 
-// Image type IDs for Smile Identity.
+// Image type IDs for Smile Identity base64 submissions.
+// These values are specific to base64-encoded image uploads.
+// See: https://docs.smileidentity.com/products/core-libraries/image-types
 const (
-	ImageTypeSelfie      = 0
-	ImageTypeIDCardFront = 1
-	ImageTypeIDCardBack  = 2
+	ImageTypeSelfie      = 2 // Base64-encoded selfie
+	ImageTypeIDCardFront = 3 // Base64-encoded ID card front
+	ImageTypeIDCardBack  = 7 // Base64-encoded ID card back
 )
 
 // VerifyIDWithPhoto verifies an ID and compares the selfie to the ID photo.
@@ -420,7 +422,10 @@ func (c *Client) GetVerificationStatus(ctx context.Context, jobID, userID string
 		return nil, err
 	}
 
-	result.Timestamp = time.Now().UTC()
+	// Only set timestamp if the API didn't provide one.
+	if result.Timestamp.IsZero() {
+		result.Timestamp = time.Now().UTC()
+	}
 	return &result, nil
 }
 

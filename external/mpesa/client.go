@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/Dorico-Dynamics/txova-go-core/logging"
@@ -223,7 +224,7 @@ func (c *Client) Initiate(ctx context.Context, phone contact.PhoneNumber, amount
 	}
 
 	var result InitiateResult
-	err := c.doRequest(ctx, http.MethodPost, "/ipg/v1x/c2bPayment/singleStage/", req, &result)
+	err := c.doRequest(ctx, http.MethodPost, ":18352/ipg/v1x/c2bPayment/singleStage/", req, &result)
 	if err != nil {
 		return nil, err
 	}
@@ -296,7 +297,7 @@ func (c *Client) Query(ctx context.Context, transactionID, thirdPartyRef string)
 	params.Set("input_ThirdPartyReference", thirdPartyRef)
 
 	var result TransactionStatus
-	err := c.doRequest(ctx, http.MethodGet, "/ipg/v1x/queryTransactionStatus/?"+params.Encode(), nil, &result)
+	err := c.doRequest(ctx, http.MethodGet, ":18353/ipg/v1x/queryTransactionStatus/?"+params.Encode(), nil, &result)
 	if err != nil {
 		return nil, err
 	}
@@ -342,7 +343,7 @@ func (c *Client) Refund(ctx context.Context, transactionID string, amount money.
 	}
 
 	var result RefundResult
-	err = c.doRequest(ctx, http.MethodPut, "/ipg/v1x/reversal/", req, &result)
+	err = c.doRequest(ctx, http.MethodPut, ":18354/ipg/v1x/reversal/", req, &result)
 	if err != nil {
 		return nil, err
 	}
@@ -350,7 +351,46 @@ func (c *Client) Refund(ctx context.Context, transactionID string, amount money.
 	return &result, nil
 }
 
+// buildURL constructs the full request URL from the base URL and path.
+// If the path starts with a port (e.g., ":18352/ipg/..."), the port is inserted
+// into the base URL only if the base URL doesn't already have a port.
+// This allows test servers (which have random ports) to work correctly.
+func (c *Client) buildURL(path string) string {
+	// Check if path starts with a port specification.
+	if path != "" && path[0] == ':' {
+		// Find where the port ends (next '/').
+		slashIdx := strings.Index(path, "/")
+		if slashIdx == -1 {
+			// No path after port, just append.
+			return c.baseURL + path
+		}
+
+		portPart := path[:slashIdx] // e.g., ":18352"
+		pathPart := path[slashIdx:] // e.g., "/ipg/v1x/..."
+
+		// Parse base URL to check if it already has a port.
+		parsed, err := url.Parse(c.baseURL)
+		if err != nil {
+			// Fallback to simple concatenation if parsing fails.
+			return c.baseURL + path
+		}
+
+		// If base URL already has a port (like test servers), skip port insertion.
+		if parsed.Port() != "" {
+			return c.baseURL + pathPart
+		}
+
+		// Insert port into the URL.
+		return parsed.Scheme + "://" + parsed.Host + portPart + pathPart
+	}
+
+	// No port prefix, simple concatenation.
+	return c.baseURL + path
+}
+
 // doRequest performs an HTTP request to the M-Pesa API.
+// The path may include a port prefix (e.g., ":18352/ipg/...") which will be
+// inserted into the URL if the base URL doesn't already have a port.
 func (c *Client) doRequest(ctx context.Context, method, path string, body, result any) error {
 	var reqBody io.Reader
 	if body != nil {
@@ -361,7 +401,8 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body, resul
 		reqBody = bytes.NewReader(jsonBody)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reqBody)
+	reqURL := c.buildURL(path)
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, reqBody)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -587,13 +628,14 @@ func (r *RefundResult) IsSuccess() bool {
 }
 
 // Common M-Pesa response codes.
+// See ResponseCodeDescription for human-readable descriptions.
 const (
-	ResponseCodeSuccess           = "INS-0"
-	ResponseCodeInsufficientFunds = "INS-1"
-	ResponseCodeInvalidMSISDN     = "INS-5"
-	ResponseCodeTimeout           = "INS-9"
-	ResponseCodeDuplicateRequest  = "INS-10"
-	ResponseCodeInvalidAmount     = "INS-13"
+	ResponseCodeSuccess          = "INS-0"
+	ResponseCodeInternalError    = "INS-1"
+	ResponseCodeInvalidMSISDN    = "INS-5"
+	ResponseCodeTimeout          = "INS-9"
+	ResponseCodeDuplicateRequest = "INS-10"
+	ResponseCodeInvalidAmount    = "INS-13"
 )
 
 // ResponseCodeDescription returns a human-readable description for a response code.

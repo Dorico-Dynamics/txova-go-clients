@@ -314,6 +314,10 @@ func (c *SMTPClient) setupConnection(client *smtp.Client) error {
 
 	// Authenticate if credentials provided.
 	if c.username != "" && c.password != "" {
+		// Refuse to send credentials over unencrypted connection.
+		if !c.useTLS {
+			return fmt.Errorf("SMTP authentication requires TLS to protect credentials")
+		}
 		auth := smtp.PlainAuth("", c.username, c.password, c.host)
 		if err := client.Auth(auth); err != nil {
 			return fmt.Errorf("SMTP authentication failed: %w", err)

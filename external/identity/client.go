@@ -83,10 +83,14 @@ type IDType string
 
 // Supported ID types for Mozambique.
 const (
-	IDTypeNationalID      IDType = "NATIONAL_ID"
-	IDTypePassport        IDType = "PASSPORT"
-	IDTypeDriversLicense  IDType = "DRIVERS_LICENSE"
-	IDTypeBirthCertifcate IDType = "BIRTH_CERTIFICATE"
+	IDTypeNationalID       IDType = "NATIONAL_ID"
+	IDTypePassport         IDType = "PASSPORT"
+	IDTypeDriversLicense   IDType = "DRIVERS_LICENSE"
+	IDTypeBirthCertificate IDType = "BIRTH_CERTIFICATE"
+
+	// Deprecated: IDTypeBirthCertifcate is a misspelling of IDTypeBirthCertificate.
+	// Use IDTypeBirthCertificate instead.
+	IDTypeBirthCertifcate IDType = IDTypeBirthCertificate
 )
 
 // JobType represents the type of verification job.
@@ -346,26 +350,28 @@ type faceCompareRequest struct {
 	PartnerParams map[string]string `json:"partner_params"`
 }
 
-// VerifyFace compares two photos to determine if they are the same person.
-// This is a SmartSelfie Authentication operation.
-func (c *Client) VerifyFace(ctx context.Context, selfie, referencePhoto []byte) (*FaceMatchResult, error) {
+// VerifyFace compares a new selfie against a previously enrolled selfie.
+// This is a SmartSelfie Authentication operation (job_type=2).
+// The enrolledSelfie should be the selfie captured during SmartSelfie Registration.
+func (c *Client) VerifyFace(ctx context.Context, selfie, enrolledSelfie []byte) (*FaceMatchResult, error) {
 	if len(selfie) == 0 {
 		return nil, fmt.Errorf("selfie is required")
 	}
-	if len(referencePhoto) == 0 {
-		return nil, fmt.Errorf("reference photo is required")
+	if len(enrolledSelfie) == 0 {
+		return nil, fmt.Errorf("enrolled selfie is required")
 	}
 
 	timestamp := time.Now().UTC().Format(time.RFC3339)
 	signature := c.generateSignature(timestamp)
 
+	// SmartSelfie Authentication compares two selfies - no ID card images.
 	req := faceCompareRequest{
 		PartnerID: c.partnerID,
 		Timestamp: timestamp,
 		Signature: signature,
 		Images: []imageEntry{
 			{ImageTypeID: ImageTypeSelfie, Image: base64.StdEncoding.EncodeToString(selfie)},
-			{ImageTypeID: ImageTypeIDCardFront, Image: base64.StdEncoding.EncodeToString(referencePhoto)},
+			{ImageTypeID: ImageTypeSelfie, Image: base64.StdEncoding.EncodeToString(enrolledSelfie)},
 		},
 		PartnerParams: map[string]string{
 			"job_type": "2", // SmartSelfie Authentication

@@ -12,7 +12,9 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/Dorico-Dynamics/txova-go-core/logging"
@@ -97,6 +99,9 @@ func NewClient(cfg *Config, logger *logging.Logger) (*Client, error) {
 	if cfg.Origin == "" {
 		return nil, fmt.Errorf("origin is required")
 	}
+	if cfg.AllowUnencryptedAPIKey && !cfg.Sandbox {
+		return nil, fmt.Errorf("unencrypted API key is only allowed in sandbox mode")
+	}
 
 	timeout := cfg.Timeout
 	if timeout == 0 {
@@ -108,6 +113,15 @@ func NewClient(cfg *Config, logger *logging.Logger) (*Client, error) {
 		baseURL = SandboxBaseURL
 	}
 
+	// Use a no-op logger if none provided to prevent nil pointer panics.
+	safeLogger := logger
+	if safeLogger == nil {
+		safeLogger = logging.New(logging.Config{
+			Level:  slog.LevelError + 1, // Above all levels - effectively disables logging.
+			Output: io.Discard,
+		})
+	}
+
 	return &Client{
 		httpClient:             &http.Client{Timeout: timeout},
 		baseURL:                baseURL,
@@ -116,7 +130,7 @@ func NewClient(cfg *Config, logger *logging.Logger) (*Client, error) {
 		serviceProviderCode:    cfg.ServiceProviderCode,
 		origin:                 cfg.Origin,
 		allowUnencryptedAPIKey: cfg.AllowUnencryptedAPIKey,
-		logger:                 logger,
+		logger:                 safeLogger,
 		producer:               cfg.Producer,
 	}, nil
 }
@@ -266,13 +280,6 @@ func (c *Client) publishPaymentInitiated(ctx context.Context, paymentID ids.Paym
 	}
 }
 
-// queryRequest is the request body for transaction queries.
-type queryRequest struct {
-	InputQueryReference      string `json:"input_QueryReference"`
-	InputServiceProviderCode string `json:"input_ServiceProviderCode"`
-	InputThirdPartyReference string `json:"input_ThirdPartyReference"`
-}
-
 // Query queries the status of a transaction.
 func (c *Client) Query(ctx context.Context, transactionID, thirdPartyRef string) (*TransactionStatus, error) {
 	if transactionID == "" {
@@ -282,14 +289,14 @@ func (c *Client) Query(ctx context.Context, transactionID, thirdPartyRef string)
 		return nil, fmt.Errorf("third party reference is required")
 	}
 
-	req := queryRequest{
-		InputQueryReference:      transactionID,
-		InputServiceProviderCode: c.serviceProviderCode,
-		InputThirdPartyReference: thirdPartyRef,
-	}
+	// Build URL query parameters instead of JSON body for GET request.
+	params := url.Values{}
+	params.Set("input_QueryReference", transactionID)
+	params.Set("input_ServiceProviderCode", c.serviceProviderCode)
+	params.Set("input_ThirdPartyReference", thirdPartyRef)
 
 	var result TransactionStatus
-	err := c.doRequest(ctx, http.MethodGet, "/ipg/v1x/queryTransactionStatus/", req, &result)
+	err := c.doRequest(ctx, http.MethodGet, "/ipg/v1x/queryTransactionStatus/?"+params.Encode(), nil, &result)
 	if err != nil {
 		return nil, err
 	}
@@ -625,6 +632,6 @@ func (c *Client) SetHTTPClient(client *http.Client) {
 }
 
 // SetBaseURL sets a custom base URL (useful for testing).
-func (c *Client) SetBaseURL(url string) {
-	c.baseURL = url
+func (c *Client) SetBaseURL(baseURL string) {
+	c.baseURL = baseURL
 }

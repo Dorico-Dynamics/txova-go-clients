@@ -122,6 +122,24 @@ func TestNewClient(t *testing.T) {
 			t.Fatal("expected error, got nil")
 		}
 	})
+
+	t.Run("returns error for AllowUnencryptedAPIKey in production", func(t *testing.T) {
+		cfg := &Config{
+			APIKey:                 "test-api-key",
+			PublicKey:              "test-public-key",
+			ServiceProviderCode:    "171717",
+			Origin:                 "developer.mpesa.vm.co.mz",
+			Sandbox:                false, // Production mode.
+			AllowUnencryptedAPIKey: true,  // Not allowed in production.
+		}
+		_, err := NewClient(cfg, nil)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if err.Error() != "unencrypted API key is only allowed in sandbox mode" {
+			t.Errorf("unexpected error message: %v", err)
+		}
+	})
 }
 
 func TestInitiate(t *testing.T) {
@@ -617,6 +635,7 @@ func TestEncryptAPIKey(t *testing.T) {
 			PublicKey:              "not-a-valid-key",
 			ServiceProviderCode:    "171717",
 			Origin:                 "developer.mpesa.vm.co.mz",
+			Sandbox:                true, // Required for AllowUnencryptedAPIKey.
 			AllowUnencryptedAPIKey: true,
 		}
 		client, err := NewClient(cfg, nil)
@@ -906,6 +925,7 @@ func createTestClient(t *testing.T, testServerURL string) *Client {
 		ServiceProviderCode:    "171717",
 		Origin:                 "developer.mpesa.vm.co.mz",
 		Timeout:                10 * time.Second,
+		Sandbox:                true, // Required for AllowUnencryptedAPIKey.
 		AllowUnencryptedAPIKey: true, // Allow fallback for testing.
 	}
 	client, err := NewClient(cfg, nil)
@@ -926,6 +946,7 @@ func createTestClientWithProducer(t *testing.T, testServerURL string, publisher 
 		Origin:                 "developer.mpesa.vm.co.mz",
 		Timeout:                10 * time.Second,
 		Producer:               publisher,
+		Sandbox:                true, // Required for AllowUnencryptedAPIKey.
 		AllowUnencryptedAPIKey: true, // Allow fallback for testing.
 	}
 	client, err := NewClient(cfg, logger)
